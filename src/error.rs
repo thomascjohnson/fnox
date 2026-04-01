@@ -278,6 +278,17 @@ pub enum FnoxError {
         url: String,
     },
 
+    #[error("{provider}: secret '{secret}' name invalid")]
+    #[diagnostic(
+        code(fnox::provider::secret_name_invalid),
+        help("The secret '{secret}' is not valid for {provider}: {hint}.")
+    )]
+    ProviderSecretNameInvalid {
+        provider: String,
+        secret: String,
+        hint: String,
+    },
+
     #[error("{provider}: secret '{secret}' not found")]
     #[diagnostic(
         code(fnox::provider::secret_not_found),
