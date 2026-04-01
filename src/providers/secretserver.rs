@@ -7,6 +7,9 @@ use std::collections::HashMap;
 const PROVIDER_NAME: &str = "Secret Server";
 const PROVIDER_URL: &str = "https://fnox.jdx.dev/providers/secretserver";
 
+const TOKEN_ERROR_DETAILS: &str = "token not configured";
+const TOKEN_ERROR_HINT: &str = "Set FNOX_SECRETSERVER_TOKEN or pass token in config";
+
 pub fn env_dependencies() -> &'static [&'static str] {
     &["FNOX_SECRETSERVER_TOKEN", "SECRETSERVER_TOKEN"]
 }
@@ -15,6 +18,15 @@ fn secretserver_token() -> Option<String> {
     env::var("FNOX_SECRETSERVER_TOKEN")
         .or_else(|_| env::var("SECRETSERVER_TOKEN"))
         .ok()
+}
+
+fn auth_error(url: &str) -> FnoxError {
+    FnoxError::ProviderAuthFailed {
+        provider: PROVIDER_NAME.to_string(),
+        details: TOKEN_ERROR_DETAILS.to_string(),
+        hint: TOKEN_ERROR_HINT.to_string(),
+        url: url.to_string(),
+    }
 }
 
 pub struct SecretServerProvider {
@@ -27,12 +39,7 @@ impl SecretServerProvider {
         let base_url = secretserver_base_url()
             .or(Some(base_url))
             .map(|v| v.trim_end_matches('/').to_string())
-            .ok_or_else(|| FnoxError::ProviderAuthFailed {
-                provider: PROVIDER_NAME.to_string(),
-                details: "token not configured".to_string(),
-                hint: "Set FNOX_SECRETSERVER_TOKEN or pass token in config".to_string(),
-                url: PROVIDER_URL.to_string(),
-            })?;
+            .ok_or_else(|| auth_error(PROVIDER_URL))?;
 
         match token {
             Some(t) => Ok(Self {
@@ -44,12 +51,7 @@ impl SecretServerProvider {
     }
 
     fn from_env(base_url: String) -> Result<Self> {
-        let ss_token = secretserver_token().ok_or_else(|| FnoxError::ProviderAuthFailed {
-            provider: PROVIDER_NAME.to_string(),
-            details: "token not configured".to_string(),
-            hint: "Set FNOX_SECRETSERVER_TOKEN or pass token in config".to_string(),
-            url: PROVIDER_URL.to_string(),
-        })?;
+        let ss_token = secretserver_token().ok_or_else(|| auth_error(PROVIDER_URL))?;
         Ok(Self {
             base_url,
             token: Some(ss_token),
@@ -72,12 +74,7 @@ impl SecretServerProvider {
     }
 
     fn ensure_token(&self, token: Option<String>) -> Result<String> {
-        token.ok_or_else(|| FnoxError::ProviderAuthFailed {
-            provider: PROVIDER_NAME.to_string(),
-            details: "token not configured".to_string(),
-            hint: "Set FNOX_SECRETSERVER_TOKEN or pass token in config".to_string(),
-            url: PROVIDER_URL.to_string(),
-        })
+        token.ok_or_else(|| auth_error(PROVIDER_URL))
     }
 
     async fn get_bearer_token(&self) -> Result<String> {
@@ -117,7 +114,10 @@ impl SecretServerProvider {
 
         let response = client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.get_bearer_token().await?))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.get_bearer_token().await?),
+            )
             .send()
             .await
             .map_err(|e| FnoxError::ProviderApiError {
@@ -227,7 +227,10 @@ impl crate::providers::Provider for SecretServerProvider {
 
         let response = client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.get_bearer_token().await?))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.get_bearer_token().await?),
+            )
             .send()
             .await
             .map_err(|e| FnoxError::ProviderApiError {
