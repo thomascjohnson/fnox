@@ -213,6 +213,11 @@ impl AddCommand {
                 auth_command: None,
             },
             ProviderType::Plain => crate::config::ProviderConfig::Plain { auth_command: None },
+            ProviderType::SecretServer => crate::config::ProviderConfig::SecretServer {
+                base_url: StringOrSecretRef::from("https://secretserver.example.com"),
+                token: StringOrSecretRef::from("your-api-token-here"),
+                auth_command: None,
+            },
             ProviderType::ProtonPass => crate::config::ProviderConfig::ProtonPass {
                 vault: self
                     .vault

@@ -85,6 +85,10 @@ pub enum ProviderType {
     #[value(name = "proton-pass")]
     #[strum(serialize = "proton-pass")]
     ProtonPass,
+    /// Delinea Secret Server (Thycotic)
+    #[value(name = "secretserver")]
+    #[strum(serialize = "secretserver")]
+    SecretServer,
     /// HashiCorp Vault
     #[value(name = "vault")]
     Vault,
