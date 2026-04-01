@@ -9,6 +9,7 @@ pub mod activate;
 pub mod check;
 pub mod ci_redact;
 pub mod completion;
+pub mod config_files;
 pub mod deactivate;
 pub mod doctor;
 pub mod edit;
@@ -18,12 +19,18 @@ pub mod get;
 pub mod hook_env;
 pub mod import;
 pub mod init;
+pub mod lease;
 pub mod list;
+pub mod mcp;
 pub mod profiles;
 pub mod provider;
+pub mod reencrypt;
 pub mod remove;
 pub mod scan;
+pub mod schema;
 pub mod set;
+pub mod sync;
+pub mod tui;
 pub mod usage;
 pub mod version;
 
@@ -34,7 +41,7 @@ pub mod version;
 #[command(help_expected = true)]
 pub struct Cli {
     /// Path to the configuration file (default: fnox.toml, searches parent directories)
-    #[arg(short, long, default_value = "fnox.toml", global = true)]
+    #[arg(short, long, default_value = crate::config::DEFAULT_CONFIG_FILENAME, global = true)]
     pub config: PathBuf,
 
     /// Profile to use (default: default, or FNOX_PROFILE env var)
@@ -45,8 +52,8 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
-    /// Path to age key file for decryption
-    #[arg(long, global = true)]
+    /// Path to age key file for decryption (deprecated: use provider config instead)
+    #[arg(long, global = true, hide = true)]
     pub age_key_file: Option<PathBuf>,
 
     /// What to do if a secret is missing (error, warn, ignore)
@@ -56,6 +63,10 @@ pub struct Cli {
     /// Disable colored output
     #[arg(long, global = true)]
     pub no_color: bool,
+
+    /// Do not merge top-level secrets into the selected profile
+    #[arg(long, global = true)]
+    pub no_defaults: bool,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -75,6 +86,9 @@ pub enum Commands {
 
     /// Generate shell completions
     Completion(completion::CompletionCommand),
+
+    /// List all config files that would be loaded
+    ConfigFiles(config_files::ConfigFilesCommand),
 
     /// Disable fnox shell integration in the current shell session
     Deactivate(deactivate::DeactivateCommand),
@@ -104,8 +118,14 @@ pub enum Commands {
     /// Initialize a new fnox configuration file
     Init(init::InitCommand),
 
+    /// Manage ephemeral credential leases
+    Lease(lease::LeaseCommand),
+
     /// List all secrets
     List(list::ListCommand),
+
+    /// Start an MCP server for secret-gated AI agent access
+    Mcp(mcp::McpCommand),
 
     /// List available profiles
     Profiles(profiles::ProfilesCommand),
@@ -113,14 +133,27 @@ pub enum Commands {
     /// Manage providers (defaults to list)
     Provider(provider::ProviderCommand),
 
+    /// Re-encrypt secrets with current provider configuration
+    Reencrypt(reencrypt::ReencryptCommand),
+
     /// Remove a secret
     Remove(remove::RemoveCommand),
 
     /// Scan repository for potential secrets
     Scan(scan::ScanCommand),
 
+    /// Generate JSON Schema for fnox configuration
+    #[command(hide = true)]
+    Schema(schema::SchemaCommand),
+
     /// Set a secret value
     Set(set::SetCommand),
+
+    /// Sync secrets from remote providers to a local encryption provider
+    Sync(sync::SyncCommand),
+
+    /// Interactive TUI dashboard for managing secrets
+    Tui(tui::TuiCommand),
 
     /// Generate usage specification
     Usage(usage::UsageCommand),
@@ -136,6 +169,8 @@ impl Commands {
             Commands::Version(cmd) => cmd.run(cli).await,
             Commands::Init(cmd) => cmd.run(cli).await,
             Commands::Completion(cmd) => cmd.run(cli).await,
+            Commands::ConfigFiles(cmd) => cmd.run(cli).await,
+            Commands::Schema(cmd) => cmd.run(cli).await,
             Commands::Usage(cmd) => cmd.run(cli).await,
             Commands::Activate(cmd) => cmd
                 .run()
@@ -158,13 +193,18 @@ impl Commands {
             Commands::Export(cmd) => cmd.run(cli, self.load_config(cli)?).await,
             Commands::Get(cmd) => cmd.run(cli, self.load_config(cli)?).await,
             Commands::Import(cmd) => cmd.run(cli, self.load_config(cli)?).await,
+            Commands::Lease(cmd) => cmd.run(cli, self.load_config(cli)?).await,
             Commands::List(cmd) => cmd.run(cli, self.load_config(cli)?).await,
+            Commands::Mcp(cmd) => cmd.run(cli, self.load_config(cli)?).await,
             Commands::Profiles(cmd) => cmd.run(cli, self.load_config(cli)?).await,
             Commands::Provider(cmd) => cmd.run(cli, self.load_config(cli)?).await,
-            Commands::Remove(cmd) => cmd.run(cli, self.load_config(cli)?).await,
+            Commands::Reencrypt(cmd) => cmd.run(cli, self.load_config(cli)?).await,
+            Commands::Remove(cmd) => cmd.run(cli).await,
             Commands::Exec(cmd) => cmd.run(cli, self.load_config(cli)?).await,
             Commands::Set(cmd) => cmd.run(cli, self.load_config(cli)?).await,
+            Commands::Sync(cmd) => cmd.run(cli, self.load_config(cli)?).await,
             Commands::Scan(cmd) => cmd.run(cli, self.load_config(cli)?).await,
+            Commands::Tui(cmd) => cmd.run(cli, self.load_config(cli)?).await,
         }
     }
 

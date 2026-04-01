@@ -21,16 +21,26 @@ jobs:
   release-plz:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           token: ${{ secrets.FNOX_GH_TOKEN }}
-      - uses: Swatinem/rust-cache@v2
-      - uses: jdx/mise-action@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: debug-ubuntu-latest
+          save-if: false
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           experimental: true
       - run: mise trust --all
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
       - run: mise run release-plz
         env:
           GITHUB_TOKEN: ${{ secrets.FNOX_GH_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

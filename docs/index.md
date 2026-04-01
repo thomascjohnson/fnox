@@ -19,13 +19,13 @@ hero:
 features:
   - icon: 🔐
     title: Multiple Provider Support
-    details: Works with age, AWS KMS/SM, Azure, GCP, 1Password, Bitwarden, HashiCorp Vault, and more.
+    details: Works with age, AWS KMS/SM, Azure, GCP, 1Password, Bitwarden, Bitwarden Secrets Manager, Infisical, password-store, HashiCorp Vault, and more.
   - icon: 📝
     title: Secrets in Git (Encrypted)
     details: Store encrypted secrets in version control with age, AWS KMS, Azure KMS, or GCP KMS.
   - icon: ☁️
     title: Cloud Secret Storage
-    details: Reference secrets stored in AWS Secrets Manager, Azure Key Vault, GCP Secret Manager, or Vault.
+    details: Reference secrets stored in AWS Secrets Manager, AWS Parameter Store, Azure Key Vault, GCP Secret Manager, or Vault.
   - icon: 🔄
     title: Shell Integration
     details: Automatically load secrets when you cd into a directory with a fnox.toml file.
@@ -53,7 +53,7 @@ fnox get DATABASE_URL
 fnox exec -- npm start
 
 # Enable shell integration (auto-load secrets on cd)
-eval "$(fnox activate bash)"  # or zsh, fish
+eval "$(fnox activate bash)"  # or zsh, fish — see docs for Nushell
 ```
 
 ## How It Works
@@ -67,16 +67,12 @@ You configure providers (encryption methods or cloud services), then assign each
 
 ```toml
 # fnox.toml
-[providers.age]
-type = "age"
-recipients = ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"]
+[providers]
+age = { type = "age", recipients = ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"] }
 
-[secrets.DATABASE_URL]
-provider = "age"
-value = "YWdlLWVuY3J5cHRpb24uLi4="  # ← encrypted ciphertext, safe to commit
-
-[secrets.API_KEY]
-default = "dev-key-12345"  # ← plain default value for local dev
+[secrets]
+DATABASE_URL = { provider = "age", value = "YWdlLWVuY3J5cHRpb24uLi4=" }  # ← encrypted ciphertext, safe to commit
+API_KEY = { default = "dev-key-12345" }  # ← plain default value for local dev
 ```
 
 ## Supported Providers
@@ -90,17 +86,21 @@ default = "dev-key-12345"  # ← plain default value for local dev
 
 ### ☁️ Cloud Secret Storage (remote, centralized)
 
+- **aws-ps** - AWS Parameter Store
 - **aws-sm** - AWS Secrets Manager
 - **azure-sm** - Azure Key Vault Secrets
 - **gcp-sm** - Google Cloud Secret Manager
+- **bitwarden-sm** - Bitwarden Secrets Manager
 - **vault** - HashiCorp Vault
 
-### 🔑 Password Managers
+### 🔑 Password Managers & Secret Services
 
 - **1password** - 1Password CLI
 - **bitwarden** - Bitwarden/Vaultwarden
+- **infisical** - Infisical secrets management
 
 ### 💻 Local Storage
 
 - **keychain** - OS Keychain (macOS/Windows/Linux)
+- **password-store** - GPG-encrypted password store (Unix pass)
 - **plain** - Plain text (for defaults only!)

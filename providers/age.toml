@@ -1,0 +1,27 @@
+# Age encryption provider - modern encryption with public/private key pairs
+display_name = "Age encryption"
+serde_rename = "age"
+rust_variant = "AgeEncryption"
+category = "Local"
+description = "Modern encryption tool - encrypts values with age keys"
+default_name = "age"
+setup_instructions = """
+Age uses public/private key pairs for encryption.
+Generate a key with: age-keygen -o ~/.config/fnox/age.txt"""
+
+[fields.recipients]
+type = "vec_string"
+wizard = false
+
+[fields.key_file]
+type = "optional"
+placeholder = ""
+label = "Key file path (optional):"
+wizard = false
+
+# TODO: Remove wizard_fields and have the wizard support vec_string fields directly
+# Currently uses a simplified 'recipient' field (singular) that maps to recipients[0]
+[wizard_fields.recipient]
+type = "required"
+placeholder = "age1..."
+label = "Age public key (recipient):"

@@ -2,7 +2,7 @@
 
 # `fnox import`
 
-- **Usage**: `fnox import [FLAGS] [FORMAT]`
+- **Usage**: `fnox import <FLAGS> [FORMAT]`
 - **Aliases**: `im`
 
 Import secrets from various sources
@@ -28,9 +28,21 @@ Import source format
 
 Skip confirmation prompts
 
+### `-g --global`
+
+Import to the global config file (~/.config/fnox/config.toml)
+
 ### `-i --input <INPUT>`
 
 Source file or path to import from (default: stdin)
+
+### `-n --dry-run`
+
+Show what would be imported without making changes
+
+### `-p --provider <PROVIDER>`
+
+Provider to use for encrypting/storing imported secrets (required)
 
 ### `--filter <FILTER>`
 

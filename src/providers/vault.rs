@@ -1,22 +1,28 @@
 use crate::env;
 use crate::error::{FnoxError, Result};
 use async_trait::async_trait;
-use std::process::Command;
-use std::{path::Path, sync::LazyLock};
+use tokio::process::Command;
 
 pub struct HashiCorpVaultProvider {
-    address: String,
+    address: Option<String>,
     path: Option<String>,
     token: Option<String>,
+    namespace: Option<String>,
 }
 
 impl HashiCorpVaultProvider {
-    pub fn new(address: String, path: Option<String>, token: Option<String>) -> Self {
-        Self {
+    pub fn new(
+        address: Option<String>,
+        path: Option<String>,
+        token: Option<String>,
+        namespace: Option<String>,
+    ) -> Result<Self> {
+        Ok(Self {
             address,
             path,
             token,
-        }
+            namespace,
+        })
     }
 
     fn get_secret_path(&self, key: &str) -> String {
@@ -26,24 +32,44 @@ impl HashiCorpVaultProvider {
         }
     }
 
+    fn get_address(&self) -> Option<String> {
+        self.address.clone().or_else(vault_address)
+    }
+
+    fn get_token(&self) -> Option<String> {
+        self.token.clone().or_else(vault_token)
+    }
+
     /// Execute vault CLI command with proper authentication
-    fn execute_vault_command(&self, args: &[&str]) -> Result<String> {
+    async fn execute_vault_command(&self, args: &[&str]) -> Result<String> {
         tracing::debug!("Executing vault command with args: {:?}", args);
 
         let mut cmd = Command::new("vault");
 
-        // Set VAULT_ADDR from provider config
-        cmd.env("VAULT_ADDR", &self.address);
+        // Set VAULT_ADDR from provider config or environment
+        let address = self.get_address().ok_or_else(|| {
+            FnoxError::Config(
+                "HashiCorp Vault provider address is not configured. Please set it in your provider configuration or via the VAULT_ADDR environment variable.".to_string(),
+            )
+        })?;
+
+        tracing::debug!("Setting VAULT_ADDR to '{}'", address);
+        cmd.env("VAULT_ADDR", address);
+
+        // Set VAULT_NAMESPACE if provided
+        if let Some(namespace) = &self.namespace {
+            tracing::debug!("Setting VAULT_NAMESPACE to '{}'", namespace);
+            cmd.env("VAULT_NAMESPACE", namespace);
+        }
 
         // Set VAULT_TOKEN from provider config or environment
         let token = self
-            .token
-            .as_ref()
-            .or(VAULT_TOKEN.as_ref())
-            .ok_or_else(|| {
-                FnoxError::Provider(
-                    "VAULT_TOKEN not set. Set it in provider config or environment.".to_string(),
-                )
+            .get_token()
+            .ok_or_else(|| FnoxError::ProviderAuthFailed {
+                provider: "HashiCorp Vault".to_string(),
+                details: "VAULT_TOKEN not set".to_string(),
+                hint: "Set VAULT_TOKEN in provider config or environment".to_string(),
+                url: "https://fnox.jdx.dev/providers/vault".to_string(),
             })?;
 
         tracing::debug!(
@@ -54,23 +80,56 @@ impl HashiCorpVaultProvider {
 
         cmd.args(args);
 
-        let output = cmd.output().map_err(|e| {
-            FnoxError::Provider(format!(
-                "Failed to execute 'vault' command: {}. Make sure the Vault CLI is installed.",
-                e
-            ))
+        let output = cmd.output().await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                FnoxError::ProviderCliNotFound {
+                    provider: "HashiCorp Vault".to_string(),
+                    cli: "vault".to_string(),
+                    install_hint: "brew install vault".to_string(),
+                    url: "https://fnox.jdx.dev/providers/vault".to_string(),
+                }
+            } else {
+                FnoxError::ProviderCliFailed {
+                    provider: "HashiCorp Vault".to_string(),
+                    details: e.to_string(),
+                    hint: "Check that the Vault CLI is installed and accessible".to_string(),
+                    url: "https://fnox.jdx.dev/providers/vault".to_string(),
+                }
+            }
         })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(FnoxError::Provider(format!(
-                "Vault CLI command failed: {}",
-                stderr.trim()
-            )));
+            let stderr_str = stderr.trim();
+            // Check for Vault-specific permission/auth error patterns
+            if stderr_str.contains("permission denied")
+                || stderr_str.contains("Code: 403")
+                || stderr_str.contains("* permission denied")
+                || stderr_str.contains("missing client token")
+                || stderr_str.contains("token expired")
+            {
+                return Err(FnoxError::ProviderAuthFailed {
+                    provider: "HashiCorp Vault".to_string(),
+                    details: stderr_str.to_string(),
+                    hint: "Check your Vault token has the required permissions".to_string(),
+                    url: "https://fnox.jdx.dev/providers/vault".to_string(),
+                });
+            }
+            return Err(FnoxError::ProviderCliFailed {
+                provider: "HashiCorp Vault".to_string(),
+                details: stderr_str.to_string(),
+                hint: "Check your Vault configuration".to_string(),
+                url: "https://fnox.jdx.dev/providers/vault".to_string(),
+            });
         }
 
-        let stdout = String::from_utf8(output.stdout)
-            .map_err(|e| FnoxError::Provider(format!("Invalid UTF-8 in command output: {}", e)))?;
+        let stdout =
+            String::from_utf8(output.stdout).map_err(|e| FnoxError::ProviderInvalidResponse {
+                provider: "HashiCorp Vault".to_string(),
+                details: format!("Invalid UTF-8 in command output: {}", e),
+                hint: "The secret value contains invalid UTF-8 characters".to_string(),
+                url: "https://fnox.jdx.dev/providers/vault".to_string(),
+            })?;
 
         Ok(stdout.trim().to_string())
     }
@@ -78,7 +137,11 @@ impl HashiCorpVaultProvider {
 
 #[async_trait]
 impl crate::providers::Provider for HashiCorpVaultProvider {
-    async fn get_secret(&self, value: &str, _key_file: Option<&Path>) -> Result<String> {
+    fn capabilities(&self) -> Vec<crate::providers::ProviderCapability> {
+        vec![crate::providers::ProviderCapability::RemoteStorage]
+    }
+
+    async fn get_secret(&self, value: &str) -> Result<String> {
         tracing::debug!("Getting secret '{}' from HashiCorp Vault", value);
 
         // Parse value as "secret-name/field" or just "secret-name"
@@ -89,10 +152,12 @@ impl crate::providers::Provider for HashiCorpVaultProvider {
             1 => (parts[0], "value"),
             2 => (parts[0], parts[1]),
             _ => {
-                return Err(FnoxError::Provider(format!(
-                    "Invalid secret reference format: '{}'. Expected 'secret' or 'secret/field'",
-                    value
-                )));
+                return Err(FnoxError::ProviderInvalidResponse {
+                    provider: "HashiCorp Vault".to_string(),
+                    details: format!("Invalid secret reference format: '{}'", value),
+                    hint: "Expected 'secret' or 'secret/field'".to_string(),
+                    url: "https://fnox.jdx.dev/providers/vault".to_string(),
+                });
             }
         };
 
@@ -109,22 +174,61 @@ impl crate::providers::Provider for HashiCorpVaultProvider {
         let field_arg = format!("-field={}", field_name);
         let args = vec!["kv", "get", &field_arg, &secret_path];
 
-        self.execute_vault_command(&args)
+        self.execute_vault_command(&args).await
     }
 
     async fn test_connection(&self) -> Result<()> {
-        tracing::debug!("Testing connection to Vault at {}", self.address);
+        let address = self.get_address();
+        if let Some(addr) = address {
+            tracing::debug!("Testing connection to Vault at {}", addr);
+        } else {
+            tracing::debug!(
+                "Testing connection to Vault (address not specified in config or environment)"
+            );
+        }
 
         // Try to get Vault status
         let args = vec!["status"];
-        self.execute_vault_command(&args)?;
+        self.execute_vault_command(&args).await?;
 
         Ok(())
     }
+
+    async fn put_secret(&self, key: &str, value: &str) -> Result<String> {
+        let secret_path = self.get_secret_path(key);
+
+        tracing::debug!("Writing secret '{}' to HashiCorp Vault", secret_path);
+
+        // Use vault kv put command: vault kv put <path> value=<value>
+        let value_arg = format!("value={}", value);
+        let args = vec!["kv", "put", &secret_path, &value_arg];
+
+        self.execute_vault_command(&args).await?;
+
+        tracing::debug!("Successfully wrote secret '{}' to Vault", secret_path);
+
+        // Return the key name to store in config
+        Ok(key.to_string())
+    }
 }
 
-static VAULT_TOKEN: LazyLock<Option<String>> = LazyLock::new(|| {
+pub fn env_dependencies() -> &'static [&'static str] {
+    &[
+        "VAULT_TOKEN",
+        "FNOX_VAULT_TOKEN",
+        "VAULT_ADDR",
+        "FNOX_VAULT_ADDR",
+    ]
+}
+
+fn vault_token() -> Option<String> {
     env::var("FNOX_VAULT_TOKEN")
         .or_else(|_| env::var("VAULT_TOKEN"))
         .ok()
-});
+}
+
+fn vault_address() -> Option<String> {
+    env::var("FNOX_VAULT_ADDR")
+        .or_else(|_| env::var("VAULT_ADDR"))
+        .ok()
+}

@@ -2,7 +2,7 @@
 
 # `fnox remove`
 
-- **Usage**: `fnox remove <KEY>`
+- **Usage**: `fnox remove [-g --global] [-n --dry-run] <KEY>`
 - **Aliases**: `rm`, `delete`
 
 Remove a secret
@@ -12,3 +12,13 @@ Remove a secret
 ### `<KEY>`
 
 Secret key to remove
+
+## Flags
+
+### `-g --global`
+
+Remove from the global config file (~/.config/fnox/config.toml)
+
+### `-n --dry-run`
+
+Show what would be removed without making changes

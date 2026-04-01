@@ -13,8 +13,8 @@
           {
             "name": "SHELL",
             "usage": "[SHELL]",
-            "help": "Shell to generate activation code for (bash, zsh, fish)",
-            "help_first_line": "Shell to generate activation code for (bash, zsh, fish)",
+            "help": "Shell to generate activation code for (bash, zsh, fish, nu)",
+            "help_first_line": "Shell to generate activation code for (bash, zsh, fish, nu)",
             "required": false,
             "double_dash": "Optional",
             "hide": false
@@ -42,10 +42,21 @@
       },
       "check": {
         "full_cmd": ["check"],
-        "usage": "check",
+        "usage": "check [-a --all]",
         "subcommands": {},
         "args": [],
-        "flags": [],
+        "flags": [
+          {
+            "name": "all",
+            "usage": "-a --all",
+            "help": "Check all secrets including those with if_missing=warn or if_missing=ignore",
+            "help_first_line": "Check all secrets including those with if_missing=warn or if_missing=ignore",
+            "short": ["a"],
+            "long": ["all"],
+            "hide": false,
+            "global": false
+          }
+        ],
         "mounts": [],
         "hide": false,
         "help": "Check if all required secrets are defined and configured",
@@ -90,6 +101,20 @@
         "name": "completion",
         "aliases": [],
         "hidden_aliases": ["complete", "completions"],
+        "examples": []
+      },
+      "config-files": {
+        "full_cmd": ["config-files"],
+        "usage": "config-files",
+        "subcommands": {},
+        "args": [],
+        "flags": [],
+        "mounts": [],
+        "hide": false,
+        "help": "List all config files that would be loaded",
+        "name": "config-files",
+        "aliases": [],
+        "hidden_aliases": [],
         "examples": []
       },
       "deactivate": {
@@ -161,7 +186,7 @@
       },
       "export": {
         "full_cmd": ["export"],
-        "usage": "export [-f --format <FORMAT>] [-o --output <OUTPUT>]",
+        "usage": "export [FLAGS]",
         "subcommands": {},
         "args": [],
         "flags": [
@@ -183,7 +208,18 @@
               "choices": {
                 "choices": ["env", "json", "yaml", "toml"]
               }
-            }
+            },
+            "default": ["env"]
+          },
+          {
+            "name": "dry-run",
+            "usage": "-n --dry-run",
+            "help": "Show what would be exported without writing to file",
+            "help_first_line": "Show what would be exported without writing to file",
+            "short": ["n"],
+            "long": ["dry-run"],
+            "hide": false,
+            "global": false
           },
           {
             "name": "output",
@@ -213,7 +249,7 @@
       },
       "get": {
         "full_cmd": ["get"],
-        "usage": "get <KEY>",
+        "usage": "get [--base64-decode] <KEY>",
         "subcommands": {},
         "args": [
           {
@@ -226,7 +262,18 @@
             "hide": false
           }
         ],
-        "flags": [],
+        "flags": [
+          {
+            "name": "base64-decode",
+            "usage": "--base64-decode",
+            "help": "Base64 decode the secret",
+            "help_first_line": "Base64 decode the secret",
+            "short": [],
+            "long": ["base64-decode"],
+            "hide": false,
+            "global": false
+          }
+        ],
         "mounts": [],
         "hide": false,
         "help": "Get a secret value",
@@ -244,8 +291,8 @@
           {
             "name": "shell",
             "usage": "-s --shell <SHELL>",
-            "help": "Shell type (bash, zsh, fish)",
-            "help_first_line": "Shell type (bash, zsh, fish)",
+            "help": "Shell type (bash, zsh, fish, nu)",
+            "help_first_line": "Shell type (bash, zsh, fish, nu)",
             "short": ["s"],
             "long": ["shell"],
             "hide": false,
@@ -269,7 +316,7 @@
       },
       "import": {
         "full_cmd": ["import"],
-        "usage": "import [FLAGS] [FORMAT]",
+        "usage": "import <FLAGS> [FORMAT]",
         "subcommands": {},
         "args": [
           {
@@ -280,7 +327,7 @@
             "required": false,
             "double_dash": "Optional",
             "hide": false,
-            "default": "env",
+            "default": ["env"],
             "choices": {
               "choices": ["env", "json", "yaml", "toml"]
             }
@@ -298,6 +345,16 @@
             "global": false
           },
           {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "Import to the global config file (~/.config/fnox/config.toml)",
+            "help_first_line": "Import to the global config file (~/.config/fnox/config.toml)",
+            "short": ["g"],
+            "long": ["global"],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "input",
             "usage": "-i --input <INPUT>",
             "help": "Source file or path to import from (default: stdin)",
@@ -309,6 +366,34 @@
             "arg": {
               "name": "INPUT",
               "usage": "<INPUT>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "dry-run",
+            "usage": "-n --dry-run",
+            "help": "Show what would be imported without making changes",
+            "help_first_line": "Show what would be imported without making changes",
+            "short": ["n"],
+            "long": ["dry-run"],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "provider",
+            "usage": "-p --provider <PROVIDER>",
+            "help": "Provider to use for encrypting/storing imported secrets (required)",
+            "help_first_line": "Provider to use for encrypting/storing imported secrets (required)",
+            "short": ["p"],
+            "long": ["provider"],
+            "required": true,
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "PROVIDER",
+              "usage": "<PROVIDER>",
               "required": true,
               "double_dash": "Optional",
               "hide": false
@@ -359,17 +444,27 @@
       },
       "init": {
         "full_cmd": ["init"],
-        "usage": "init [--force] [--skip-wizard]",
+        "usage": "init [FLAGS]",
         "subcommands": {},
         "args": [],
         "flags": [
           {
             "name": "force",
-            "usage": "--force",
+            "usage": "-f --force",
             "help": "Overwrite existing configuration file",
             "help_first_line": "Overwrite existing configuration file",
-            "short": [],
+            "short": ["f"],
             "long": ["force"],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "Initialize the global config file (~/.config/fnox/config.toml)",
+            "help_first_line": "Initialize the global config file (~/.config/fnox/config.toml)",
+            "short": ["g"],
+            "long": ["global"],
             "hide": false,
             "global": false
           },
@@ -389,6 +484,195 @@
         "help": "Initialize a new fnox configuration file",
         "name": "init",
         "aliases": ["i"],
+        "hidden_aliases": [],
+        "examples": []
+      },
+      "lease": {
+        "full_cmd": ["lease"],
+        "usage": "lease <SUBCOMMAND>",
+        "subcommands": {
+          "cleanup": {
+            "full_cmd": ["lease", "cleanup"],
+            "usage": "lease cleanup",
+            "subcommands": {},
+            "args": [],
+            "flags": [],
+            "mounts": [],
+            "hide": false,
+            "help": "Revoke all expired leases that need manual cleanup",
+            "name": "cleanup",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          },
+          "create": {
+            "full_cmd": ["lease", "create"],
+            "usage": "lease create [FLAGS] [BACKEND_NAME]",
+            "subcommands": {},
+            "args": [
+              {
+                "name": "BACKEND_NAME",
+                "usage": "[BACKEND_NAME]",
+                "help": "Lease backend name (from `[leases.<name>]` config). Creates all backends if omitted",
+                "help_first_line": "Lease backend name (from `[leases.<name>]` config). Creates all backends if omitted",
+                "required": false,
+                "double_dash": "Optional",
+                "hide": false
+              }
+            ],
+            "flags": [
+              {
+                "name": "all",
+                "usage": "-a --all",
+                "help": "Create leases for all configured backends",
+                "help_first_line": "Create leases for all configured backends",
+                "short": ["a"],
+                "long": ["all"],
+                "hide": false,
+                "global": false
+              },
+              {
+                "name": "duration",
+                "usage": "-d --duration <DURATION>",
+                "help": "Lease duration (e.g., \"15m\", \"1h\", \"2h30m\"); overrides config duration",
+                "help_first_line": "Lease duration (e.g., \"15m\", \"1h\", \"2h30m\"); overrides config duration",
+                "short": ["d"],
+                "long": ["duration"],
+                "hide": false,
+                "global": false,
+                "arg": {
+                  "name": "DURATION",
+                  "usage": "<DURATION>",
+                  "required": true,
+                  "double_dash": "Optional",
+                  "hide": false
+                }
+              },
+              {
+                "name": "format",
+                "usage": "-f --format <FORMAT>",
+                "help": "Output format",
+                "help_first_line": "Output format",
+                "short": ["f"],
+                "long": ["format"],
+                "hide": false,
+                "global": false,
+                "arg": {
+                  "name": "FORMAT",
+                  "usage": "<FORMAT>",
+                  "required": true,
+                  "double_dash": "Optional",
+                  "hide": false,
+                  "choices": {
+                    "choices": ["shell", "json", "env"]
+                  }
+                },
+                "default": ["shell"]
+              },
+              {
+                "name": "interactive",
+                "usage": "-i --interactive",
+                "help": "Prompt interactively for missing credentials",
+                "help_first_line": "Prompt interactively for missing credentials",
+                "short": ["i"],
+                "long": ["interactive"],
+                "hide": false,
+                "global": false
+              },
+              {
+                "name": "label",
+                "usage": "-l --label <LABEL>",
+                "help": "Label for the lease (e.g., session purpose)",
+                "help_first_line": "Label for the lease (e.g., session purpose)",
+                "short": ["l"],
+                "long": ["label"],
+                "hide": false,
+                "global": false,
+                "arg": {
+                  "name": "LABEL",
+                  "usage": "<LABEL>",
+                  "required": true,
+                  "double_dash": "Optional",
+                  "hide": false
+                },
+                "default": ["fnox-lease"]
+              }
+            ],
+            "mounts": [],
+            "hide": false,
+            "help": "Create a short-lived credential lease from a secret",
+            "name": "create",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          },
+          "list": {
+            "full_cmd": ["lease", "list"],
+            "usage": "lease list [--active] [--expired]",
+            "subcommands": {},
+            "args": [],
+            "flags": [
+              {
+                "name": "active",
+                "usage": "--active",
+                "help": "Show only active (non-expired, non-revoked) leases",
+                "help_first_line": "Show only active (non-expired, non-revoked) leases",
+                "short": [],
+                "long": ["active"],
+                "hide": false,
+                "global": false
+              },
+              {
+                "name": "expired",
+                "usage": "--expired",
+                "help": "Show only expired leases",
+                "help_first_line": "Show only expired leases",
+                "short": [],
+                "long": ["expired"],
+                "hide": false,
+                "global": false
+              }
+            ],
+            "mounts": [],
+            "hide": false,
+            "help": "List tracked leases",
+            "name": "list",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          },
+          "revoke": {
+            "full_cmd": ["lease", "revoke"],
+            "usage": "lease revoke <LEASE_ID>",
+            "subcommands": {},
+            "args": [
+              {
+                "name": "LEASE_ID",
+                "usage": "<LEASE_ID>",
+                "help": "Lease ID to revoke",
+                "help_first_line": "Lease ID to revoke",
+                "required": true,
+                "double_dash": "Optional",
+                "hide": false
+              }
+            ],
+            "flags": [],
+            "mounts": [],
+            "hide": false,
+            "help": "Revoke a lease by ID",
+            "name": "revoke",
+            "aliases": [],
+            "hidden_aliases": [],
+            "examples": []
+          }
+        },
+        "args": [],
+        "flags": [],
+        "mounts": [],
+        "hide": false,
+        "help": "Manage ephemeral credential leases",
+        "name": "lease",
+        "aliases": [],
         "hidden_aliases": [],
         "examples": []
       },
@@ -447,6 +731,20 @@
         "hidden_aliases": [],
         "examples": []
       },
+      "mcp": {
+        "full_cmd": ["mcp"],
+        "usage": "mcp",
+        "subcommands": {},
+        "args": [],
+        "flags": [],
+        "mounts": [],
+        "hide": false,
+        "help": "Start an MCP server for secret-gated AI agent access",
+        "name": "mcp",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": []
+      },
       "profiles": {
         "full_cmd": ["profiles"],
         "usage": "profiles",
@@ -478,7 +776,7 @@
         "subcommands": {
           "add": {
             "full_cmd": ["provider", "add"],
-            "usage": "provider add <PROVIDER> <PROVIDER_TYPE>",
+            "usage": "provider add [-g --global] [--vault <VAULT>] <PROVIDER> <PROVIDER_TYPE>",
             "subcommands": {},
             "args": [
               {
@@ -501,19 +799,59 @@
                 "choices": {
                   "choices": [
                     "1password",
+                    "age",
                     "aws",
-                    "vault",
-                    "gcp",
                     "aws-kms",
+                    "aws-ps",
                     "azure-kms",
                     "azure-sm",
+                    "gcp",
                     "gcp-kms",
-                    "age"
+                    "fido2",
+                    "bitwarden",
+                    "bitwarden-sm",
+                    "infisical",
+                    "keepass",
+                    "keychain",
+                    "password-store",
+                    "passwordstate",
+                    "plain",
+                    "proton-pass",
+                    "vault",
+                    "yubikey"
                   ]
                 }
               }
             ],
-            "flags": [],
+            "flags": [
+              {
+                "name": "global",
+                "usage": "-g --global",
+                "help": "Add to the global config file (~/.config/fnox/config.toml)",
+                "help_first_line": "Add to the global config file (~/.config/fnox/config.toml)",
+                "short": ["g"],
+                "long": ["global"],
+                "hide": false,
+                "global": false
+              },
+              {
+                "name": "vault",
+                "usage": "--vault <VAULT>",
+                "help": "Default Proton Pass vault name (only valid with provider type proton-pass)",
+                "help_first_line": "Default Proton Pass vault name (only valid with provider type proton-pass)",
+                "short": [],
+                "long": ["vault"],
+                "hide": false,
+                "global": false,
+                "arg": {
+                  "name": "VAULT",
+                  "usage": "<VAULT>",
+                  "required": true,
+                  "double_dash": "Optional",
+                  "hide": false
+                }
+              }
+            ],
             "mounts": [],
             "hide": false,
             "help": "Add a new provider",
@@ -549,7 +887,7 @@
           },
           "remove": {
             "full_cmd": ["provider", "remove"],
-            "usage": "provider remove <PROVIDER>",
+            "usage": "provider remove [-g --global] <PROVIDER>",
             "subcommands": {},
             "args": [
               {
@@ -562,7 +900,18 @@
                 "hide": false
               }
             ],
-            "flags": [],
+            "flags": [
+              {
+                "name": "global",
+                "usage": "-g --global",
+                "help": "Remove from the global config file (~/.config/fnox/config.toml)",
+                "help_first_line": "Remove from the global config file (~/.config/fnox/config.toml)",
+                "short": ["g"],
+                "long": ["global"],
+                "hide": false,
+                "global": false
+              }
+            ],
             "mounts": [],
             "hide": false,
             "help": "Remove a provider",
@@ -573,20 +922,31 @@
           },
           "test": {
             "full_cmd": ["provider", "test"],
-            "usage": "provider test <PROVIDER>",
+            "usage": "provider test [-a --all] [PROVIDER]",
             "subcommands": {},
             "args": [
               {
                 "name": "PROVIDER",
-                "usage": "<PROVIDER>",
-                "help": "Provider name",
-                "help_first_line": "Provider name",
-                "required": true,
+                "usage": "[PROVIDER]",
+                "help": "Provider name (optional when using --all)",
+                "help_first_line": "Provider name (optional when using --all)",
+                "required": false,
                 "double_dash": "Optional",
                 "hide": false
               }
             ],
-            "flags": [],
+            "flags": [
+              {
+                "name": "all",
+                "usage": "-a --all",
+                "help": "Test all configured providers",
+                "help_first_line": "Test all configured providers",
+                "short": ["a"],
+                "long": ["all"],
+                "hide": false,
+                "global": false
+              }
+            ],
             "mounts": [],
             "hide": false,
             "help": "Test a provider connection",
@@ -606,9 +966,89 @@
         "hidden_aliases": [],
         "examples": []
       },
+      "reencrypt": {
+        "full_cmd": ["reencrypt"],
+        "usage": "reencrypt [FLAGS] [KEYS]…",
+        "subcommands": {},
+        "args": [
+          {
+            "name": "KEYS",
+            "usage": "[KEYS]…",
+            "help": "Only re-encrypt these specific secret keys",
+            "help_first_line": "Only re-encrypt these specific secret keys",
+            "required": false,
+            "double_dash": "Optional",
+            "var": true,
+            "hide": false
+          }
+        ],
+        "flags": [
+          {
+            "name": "force",
+            "usage": "-f --force",
+            "help": "Skip confirmation prompt",
+            "help_first_line": "Skip confirmation prompt",
+            "short": ["f"],
+            "long": ["force"],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "dry-run",
+            "usage": "-n --dry-run",
+            "help": "Show what would be done without making changes",
+            "help_first_line": "Show what would be done without making changes",
+            "short": ["n"],
+            "long": ["dry-run"],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "provider",
+            "usage": "-p --provider <PROVIDER>",
+            "help": "Only re-encrypt secrets from this provider",
+            "help_first_line": "Only re-encrypt secrets from this provider",
+            "short": ["p"],
+            "long": ["provider"],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "PROVIDER",
+              "usage": "<PROVIDER>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "filter",
+            "usage": "--filter <FILTER>",
+            "help": "Only re-encrypt matching secrets (regex pattern)",
+            "help_first_line": "Only re-encrypt matching secrets (regex pattern)",
+            "short": [],
+            "long": ["filter"],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "FILTER",
+              "usage": "<FILTER>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          }
+        ],
+        "mounts": [],
+        "hide": false,
+        "help": "Re-encrypt secrets with current provider configuration",
+        "name": "reencrypt",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": []
+      },
       "remove": {
         "full_cmd": ["remove"],
-        "usage": "remove <KEY>",
+        "usage": "remove [-g --global] [-n --dry-run] <KEY>",
         "subcommands": {},
         "args": [
           {
@@ -621,7 +1061,28 @@
             "hide": false
           }
         ],
-        "flags": [],
+        "flags": [
+          {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "Remove from the global config file (~/.config/fnox/config.toml)",
+            "help_first_line": "Remove from the global config file (~/.config/fnox/config.toml)",
+            "short": ["g"],
+            "long": ["global"],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "dry-run",
+            "usage": "-n --dry-run",
+            "help": "Show what would be removed without making changes",
+            "help_first_line": "Show what would be removed without making changes",
+            "short": ["n"],
+            "long": ["dry-run"],
+            "hide": false,
+            "global": false
+          }
+        ],
         "mounts": [],
         "hide": false,
         "help": "Remove a secret",
@@ -651,7 +1112,8 @@
               "required": true,
               "double_dash": "Optional",
               "hide": false
-            }
+            },
+            "default": ["."]
           },
           {
             "name": "ignore",
@@ -690,6 +1152,20 @@
         "hidden_aliases": [],
         "examples": []
       },
+      "schema": {
+        "full_cmd": ["schema"],
+        "usage": "schema",
+        "subcommands": {},
+        "args": [],
+        "flags": [],
+        "mounts": [],
+        "hide": true,
+        "help": "Generate JSON Schema for fnox configuration",
+        "name": "schema",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": []
+      },
       "set": {
         "full_cmd": ["set"],
         "usage": "set [FLAGS] <KEY> [VALUE]",
@@ -707,8 +1183,9 @@
           {
             "name": "VALUE",
             "usage": "[VALUE]",
-            "help": "Secret value (reads from stdin if not provided)",
-            "help_first_line": "Secret value (reads from stdin if not provided)",
+            "help": "Secret value to store",
+            "help_long": "Secret value to store.\n\nIf omitted: reads from stdin when piped (`echo \"x\" | fnox set KEY`), or prompts interactively with hidden input.\n\nPassing secrets as arguments exposes them in shell history and `ps` output. For sensitive values, prefer stdin or the interactive prompt.",
+            "help_first_line": "Secret value to store",
             "required": false,
             "double_dash": "Optional",
             "hide": false
@@ -733,6 +1210,16 @@
             }
           },
           {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "Save to the global config file (~/.config/fnox/config.toml)",
+            "help_first_line": "Save to the global config file (~/.config/fnox/config.toml)",
+            "short": ["g"],
+            "long": ["global"],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "key-name",
             "usage": "-k --key-name <KEY_NAME>",
             "help": "Key name in the provider (if different from env var name)",
@@ -750,11 +1237,21 @@
             }
           },
           {
+            "name": "dry-run",
+            "usage": "-n --dry-run",
+            "help": "Show what would be done without making changes",
+            "help_first_line": "Show what would be done without making changes",
+            "short": ["n"],
+            "long": ["dry-run"],
+            "hide": false,
+            "global": false
+          },
+          {
             "name": "provider",
-            "usage": "-P --provider <PROVIDER>",
+            "usage": "-p --provider <PROVIDER>",
             "help": "Provider to fetch from",
             "help_first_line": "Provider to fetch from",
-            "short": ["P"],
+            "short": ["p"],
             "long": ["provider"],
             "hide": false,
             "global": false,
@@ -765,6 +1262,16 @@
               "double_dash": "Optional",
               "hide": false
             }
+          },
+          {
+            "name": "base64-encode",
+            "usage": "--base64-encode",
+            "help": "Base64 encode the secret",
+            "help_first_line": "Base64 encode the secret",
+            "short": [],
+            "long": ["base64-encode"],
+            "hide": false,
+            "global": false
           },
           {
             "name": "default",
@@ -809,6 +1316,137 @@
         "help": "Set a secret value",
         "name": "set",
         "aliases": ["s"],
+        "hidden_aliases": [],
+        "examples": []
+      },
+      "sync": {
+        "full_cmd": ["sync"],
+        "usage": "sync [FLAGS] [KEYS]…",
+        "subcommands": {},
+        "args": [
+          {
+            "name": "KEYS",
+            "usage": "[KEYS]…",
+            "help": "Only sync these specific secret keys",
+            "help_first_line": "Only sync these specific secret keys",
+            "required": false,
+            "double_dash": "Optional",
+            "var": true,
+            "hide": false
+          }
+        ],
+        "flags": [
+          {
+            "name": "force",
+            "usage": "-f --force",
+            "help": "Skip confirmation prompt",
+            "help_first_line": "Skip confirmation prompt",
+            "short": ["f"],
+            "long": ["force"],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "global",
+            "usage": "-g --global",
+            "help": "Write to global config (~/.config/fnox/config.toml)",
+            "help_first_line": "Write to global config (~/.config/fnox/config.toml)",
+            "short": ["g"],
+            "long": ["global"],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "dry-run",
+            "usage": "-n --dry-run",
+            "help": "Show what would be done without making changes",
+            "help_first_line": "Show what would be done without making changes",
+            "short": ["n"],
+            "long": ["dry-run"],
+            "hide": false,
+            "global": false
+          },
+          {
+            "name": "provider",
+            "usage": "-p --provider <PROVIDER>",
+            "help": "Target encryption provider (defaults to default_provider)",
+            "help_first_line": "Target encryption provider (defaults to default_provider)",
+            "short": ["p"],
+            "long": ["provider"],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "PROVIDER",
+              "usage": "<PROVIDER>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "source",
+            "usage": "-s --source <SOURCE>",
+            "help": "Only sync secrets from this source provider",
+            "help_first_line": "Only sync secrets from this source provider",
+            "short": ["s"],
+            "long": ["source"],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "SOURCE",
+              "usage": "<SOURCE>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "filter",
+            "usage": "--filter <FILTER>",
+            "help": "Only sync matching secrets (regex pattern)",
+            "help_first_line": "Only sync matching secrets (regex pattern)",
+            "short": [],
+            "long": ["filter"],
+            "hide": false,
+            "global": false,
+            "arg": {
+              "name": "FILTER",
+              "usage": "<FILTER>",
+              "required": true,
+              "double_dash": "Optional",
+              "hide": false
+            }
+          },
+          {
+            "name": "local-file",
+            "usage": "--local-file",
+            "help": "Write sync overrides to the local override file next to the config file",
+            "help_first_line": "Write sync overrides to the local override file next to the config file",
+            "short": [],
+            "long": ["local-file"],
+            "hide": false,
+            "global": false
+          }
+        ],
+        "mounts": [],
+        "hide": false,
+        "help": "Sync secrets from remote providers to a local encryption provider",
+        "name": "sync",
+        "aliases": [],
+        "hidden_aliases": [],
+        "examples": []
+      },
+      "tui": {
+        "full_cmd": ["tui"],
+        "usage": "tui",
+        "subcommands": {},
+        "args": [],
+        "flags": [],
+        "mounts": [],
+        "hide": false,
+        "help": "Interactive TUI dashboard for managing secrets",
+        "name": "tui",
+        "aliases": [],
         "hidden_aliases": [],
         "examples": []
       },
@@ -858,14 +1496,15 @@
           "required": true,
           "double_dash": "Optional",
           "hide": false
-        }
+        },
+        "default": ["fnox.toml"]
       },
       {
         "name": "profile",
-        "usage": "-p --profile <PROFILE>",
+        "usage": "-P --profile <PROFILE>",
         "help": "Profile to use (default: default, or FNOX_PROFILE env var)",
         "help_first_line": "Profile to use (default: default, or FNOX_PROFILE env var)",
-        "short": ["p"],
+        "short": ["P"],
         "long": ["profile"],
         "hide": false,
         "global": true,
@@ -890,11 +1529,11 @@
       {
         "name": "age-key-file",
         "usage": "--age-key-file <AGE_KEY_FILE>",
-        "help": "Path to age key file for decryption",
-        "help_first_line": "Path to age key file for decryption",
+        "help": "Path to age key file for decryption (deprecated: use provider config instead)",
+        "help_first_line": "Path to age key file for decryption (deprecated: use provider config instead)",
         "short": [],
         "long": ["age-key-file"],
-        "hide": false,
+        "hide": true,
         "global": true,
         "arg": {
           "name": "AGE_KEY_FILE",
@@ -930,6 +1569,16 @@
         "long": ["no-color"],
         "hide": false,
         "global": true
+      },
+      {
+        "name": "no-defaults",
+        "usage": "--no-defaults",
+        "help": "Do not merge top-level secrets into the selected profile",
+        "help_first_line": "Do not merge top-level secrets into the selected profile",
+        "short": [],
+        "long": ["no-defaults"],
+        "hide": false,
+        "global": true
       }
     ],
     "mounts": [],
@@ -942,7 +1591,7 @@
   "config": {
     "props": {}
   },
-  "version": "1.1.0",
+  "version": "1.19.0",
   "usage": "Usage: fnox [OPTIONS] <COMMAND>",
   "complete": {
     "key": {

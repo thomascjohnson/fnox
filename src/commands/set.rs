@@ -1,9 +1,8 @@
 use crate::commands::Cli;
-use crate::config::{Config, IfMissing, ProviderConfig};
+use crate::config::{self, Config, IfMissing};
 use crate::error::{FnoxError, Result};
 use clap::Args;
 use std::io::{self, Read};
-use std::path::PathBuf;
 
 #[derive(Debug, Args)]
 #[command(visible_aliases = ["s"])]
@@ -11,20 +10,38 @@ pub struct SetCommand {
     /// Secret key (environment variable name)
     pub key: String,
 
-    /// Secret value (reads from stdin if not provided)
+    /// Secret value to store.
+    ///
+    /// If omitted: reads from stdin when piped (`echo "x" | fnox set KEY`),
+    /// or prompts interactively with hidden input.
+    ///
+    /// Passing secrets as arguments exposes them in shell history and `ps` output.
+    /// For sensitive values, prefer stdin or the interactive prompt.
     pub value: Option<String>,
 
     /// Description of the secret
     #[arg(short = 'd', long)]
     pub description: Option<String>,
 
+    /// Save to the global config file (~/.config/fnox/config.toml)
+    #[arg(short = 'g', long)]
+    pub global: bool,
+
     /// Key name in the provider (if different from env var name)
     #[arg(short = 'k', long)]
     pub key_name: Option<String>,
 
+    /// Show what would be done without making changes
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+
     /// Provider to fetch from
     #[arg(short = 'p', long)]
     pub provider: Option<String>,
+
+    /// Base64 encode the secret
+    #[arg(long)]
+    pub base64_encode: bool,
 
     /// Default value to use if secret is not found
     #[arg(long)]
@@ -41,17 +58,14 @@ impl SetCommand {
         tracing::debug!("Setting secret '{}' in profile '{}'", self.key, profile);
 
         // Check if we're only setting metadata (no actual secret value)
-        let has_metadata = self.description.is_some()
-            || self.if_missing.is_some()
-            || self.default.is_some()
-            || self.provider.is_some()
-            || self.key_name.is_some();
+        let has_metadata =
+            self.description.is_some() || self.if_missing.is_some() || self.default.is_some();
 
         // Get the secret value if provided
         let secret_value = if let Some(ref v) = self.value {
             // Value provided as argument
             Some(v.clone())
-        } else if has_metadata {
+        } else if has_metadata && self.key_name.is_none() {
             // Only metadata is being set, no secret value needed
             None
         } else if !atty::is(atty::Stream::Stdin) {
@@ -60,11 +74,10 @@ impl SetCommand {
             let mut buffer = String::new();
             io::stdin()
                 .read_to_string(&mut buffer)
-                .map_err(|e| FnoxError::Config(format!("Failed to read from stdin: {}", e)))?;
+                .map_err(|source| FnoxError::StdinReadFailed { source })?;
             Some(buffer.trim().to_string())
         } else {
             // Interactive terminal - prompt for value
-            tracing::debug!("Prompting for secret value interactively");
             let value = demand::Input::new("Enter secret value")
                 .prompt("Secret value: ")
                 .password(true)
@@ -82,14 +95,29 @@ impl SetCommand {
             config.get_default_provider(&profile)?
         };
 
+        // Check if secret should be base64 encoded
+        let secret_value = if self.base64_encode {
+            secret_value
+                .as_ref()
+                .map(|value| data_encoding::BASE64.encode(value.as_bytes()))
+        } else {
+            secret_value
+        };
+
         // Handle provider-specific behavior (before we get mutable borrow)
         let (encrypted_value, remote_key_name) = if let Some(ref value) = secret_value {
             if let Some(ref provider_name) = provider_name_to_use {
                 // Get the provider config
                 let providers = config.get_providers(&profile);
                 if let Some(provider_config) = providers.get(provider_name) {
-                    // Get the provider and check its capabilities
-                    let provider = crate::providers::get_provider(provider_config)?;
+                    // Get the provider (resolving any secret refs) and check its capabilities
+                    let provider = crate::providers::get_provider_resolved(
+                        &config,
+                        &profile,
+                        provider_name,
+                        provider_config,
+                    )
+                    .await?;
                     let capabilities = provider.capabilities();
 
                     // Ensure the provider has at least one capability
@@ -111,24 +139,14 @@ impl SetCommand {
                             provider_name
                         );
 
-                        // Encrypt with the provider
-                        match provider
-                            .encrypt(
-                                value,
-                                cli.age_key_file.as_ref().map(PathBuf::from).as_deref(),
-                            )
-                            .await
-                        {
-                            Ok(encrypted) => (Some(encrypted), None),
-                            Err(e) => {
-                                // Provider doesn't support encryption, store plaintext
-                                tracing::warn!(
-                                    "Encryption not supported for provider '{}': {}. Storing plaintext.",
-                                    provider_name,
-                                    e
-                                );
-                                (Some(value.clone()), None)
-                            }
+                        if self.dry_run {
+                            // In dry-run mode, skip actual encryption
+                            (Some("<encrypted>".to_string()), None)
+                        } else {
+                            // Encrypt with the provider — fail on error rather than
+                            // silently storing plaintext
+                            let encrypted = provider.encrypt(value).await?;
+                            (Some(encrypted), None)
                         }
                     } else if is_remote_storage_provider {
                         tracing::debug!(
@@ -137,39 +155,17 @@ impl SetCommand {
                             provider_name
                         );
 
-                        // Push the secret to the remote provider
-                        match provider_config {
-                            ProviderConfig::AwsSecretsManager { region, prefix } => {
-                                let sm_provider =
-                                    crate::providers::aws_sm::AwsSecretsManagerProvider::new(
-                                        region.clone(),
-                                        prefix.clone(),
-                                    );
-                                let secret_name = sm_provider.get_secret_name(&self.key);
-                                sm_provider.put_secret(&secret_name, value).await?;
+                        if self.dry_run {
+                            // In dry-run mode, skip actual remote storage
+                            let key_name = self.key_name.as_deref().unwrap_or(&self.key);
+                            (None, Some(key_name.to_string()))
+                        } else {
+                            // Use the already-resolved provider to store the secret
+                            let key_name = self.key_name.as_deref().unwrap_or(&self.key);
+                            let stored_key = provider.put_secret(key_name, value).await?;
 
-                                // Store just the key name (without prefix) in config
-                                (None, Some(self.key.clone()))
-                            }
-                            ProviderConfig::Keychain { service, prefix } => {
-                                let keychain_provider =
-                                    crate::providers::keychain::KeychainProvider::new(
-                                        service.clone(),
-                                        prefix.clone(),
-                                    );
-                                keychain_provider.put_secret(&self.key, value).await?;
-
-                                // Store just the key name (without prefix) in config
-                                (None, Some(self.key.clone()))
-                            }
-                            _ => {
-                                // Other remote storage providers not yet implemented
-                                tracing::warn!(
-                                    "Remote storage not yet implemented for provider '{}', storing plaintext",
-                                    provider_name
-                                );
-                                (Some(value.clone()), None)
-                            }
+                            // Store just the key name (without prefix) in config
+                            (None, Some(stored_key))
                         }
                     } else {
                         // Not an encryption or remote storage provider
@@ -210,42 +206,121 @@ impl SetCommand {
 
         // Set the provider if explicitly specified
         if let Some(ref provider) = self.provider {
-            secret_config.provider = Some(provider.clone());
-        } else if provider_name_to_use.is_some() && secret_config.provider.is_none() {
+            secret_config.set_provider(Some(provider.clone()));
+        } else if provider_name_to_use.is_some() && secret_config.provider().is_none() {
             // If we have a default provider and the secret doesn't already have one,
             // store it explicitly for clarity
-            secret_config.provider = provider_name_to_use.clone();
+            secret_config.set_provider(provider_name_to_use.clone());
         }
 
-        if let Some(ref key_name) = self.key_name {
-            secret_config.value = Some(key_name.clone());
-        } else if let Some(ref value) = secret_value {
+        if let Some(ref value) = secret_value {
             // Priority order: remote key name, encrypted value, then plaintext
             if let Some(remote_key) = remote_key_name {
                 // Store the key name for remote storage providers
-                secret_config.value = Some(remote_key);
+                secret_config.set_value(Some(remote_key));
             } else if let Some(encrypted) = encrypted_value {
                 // Store encrypted value for encryption providers
-                secret_config.value = Some(encrypted);
+                secret_config.set_value(Some(encrypted));
             } else if provider_name_to_use.is_some() {
                 // Provider specified or default provider available (but not an encryption/remote provider)
-                secret_config.value = Some(value.clone());
+                secret_config.set_value(Some(value.clone()));
             } else {
                 // No provider specified or available, store as default value
-                secret_config.value = Some(value.clone());
+                secret_config.set_value(Some(value.clone()));
                 secret_config.default = Some(value.clone());
             }
         }
 
+        let secret_config = profile_secrets.get(&self.key).unwrap().clone();
         let _ = profile_secrets; // Release the mutable borrow
-        config.save(&cli.config)?;
-        let check = console::style("✓").green();
-        let styled_key = console::style(&self.key).cyan();
-        let styled_profile = console::style(&profile).magenta();
-        if profile == "default" {
-            println!("{check} Set secret {styled_key}");
+
+        // Save the secret to the appropriate config file
+        let target_path = if self.global {
+            // Save to global config
+            let global_path = Config::global_config_path();
+            // Create parent directory if it doesn't exist
+            if let Some(parent) = global_path.parent()
+                && !self.dry_run
+            {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    FnoxError::Config(format!(
+                        "Failed to create config directory '{}': {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+            }
+            global_path
         } else {
-            println!("{check} Set secret {styled_key} in profile {styled_profile}");
+            let current_dir = std::env::current_dir().map_err(|e| {
+                FnoxError::Config(format!("Failed to get current directory: {}", e))
+            })?;
+            // Only use auto-detection when --config is the clap default ("fnox.toml").
+            // Any other value means the user explicitly chose a config file.
+            if cli.config == std::path::Path::new(config::DEFAULT_CONFIG_FILENAME) {
+                config::find_local_config(&current_dir, Some(&profile))
+            } else {
+                current_dir.join(&cli.config)
+            }
+        };
+
+        if self.dry_run {
+            // Show what would be done
+            let dry_run_label = console::style("[dry-run]").yellow().bold();
+            let styled_key = console::style(&self.key).cyan();
+            let styled_profile = console::style(&profile).magenta();
+            let styled_path = console::style(target_path.display()).dim();
+            let global_suffix = if self.global { " (global)" } else { "" };
+
+            if profile == "default" {
+                println!(
+                    "{dry_run_label} Would set secret {styled_key}{global_suffix} in {styled_path}"
+                );
+            } else {
+                println!(
+                    "{dry_run_label} Would set secret {styled_key} in profile {styled_profile}{global_suffix} in {styled_path}"
+                );
+            }
+
+            // Show the config that would be written
+            if let Some(provider) = secret_config.provider() {
+                println!("  provider: {}", console::style(provider).green());
+            }
+            if let Some(value) = secret_config.value() {
+                // Use character-aware truncation to avoid panicking on multi-byte UTF-8
+                let display_value = if value.chars().count() > 50 {
+                    format!("{}...", value.chars().take(50).collect::<String>())
+                } else {
+                    value.to_string()
+                };
+                println!("  value: {}", console::style(display_value).dim());
+            }
+            if let Some(ref desc) = secret_config.description {
+                println!("  description: {}", console::style(desc).dim());
+            }
+            if let Some(ref default) = secret_config.default {
+                println!("  default: {}", console::style(default).dim());
+            }
+            if let Some(if_missing) = secret_config.if_missing {
+                println!(
+                    "  if_missing: {}",
+                    console::style(format!("{:?}", if_missing).to_lowercase()).dim()
+                );
+            }
+        } else {
+            config.save_secret_to_source(&self.key, &secret_config, &profile, &target_path)?;
+
+            let check = console::style("✓").green();
+            let styled_key = console::style(&self.key).cyan();
+            let styled_profile = console::style(&profile).magenta();
+            let global_suffix = if self.global { " (global)" } else { "" };
+            if profile == "default" {
+                println!("{check} Set secret {styled_key}{global_suffix}");
+            } else {
+                println!(
+                    "{check} Set secret {styled_key} in profile {styled_profile}{global_suffix}"
+                );
+            }
         }
 
         Ok(())

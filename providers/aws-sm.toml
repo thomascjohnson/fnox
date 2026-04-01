@@ -1,0 +1,34 @@
+# AWS Secrets Manager provider - remote secrets storage
+display_name = "AWS Secrets Manager"
+serde_rename = "aws-sm"
+rust_variant = "AwsSecretsManager"
+category = "CloudSecretsManager"
+description = "AWS Secrets Manager"
+default_name = "sm"
+auth_command = "aws sso login"
+setup_instructions = """
+Stores secrets in AWS Secrets Manager.
+Requires AWS credentials configured."""
+
+[fields.region]
+type = "required"
+placeholder = "us-east-1"
+label = "AWS Region:"
+wizard = true
+
+[fields.profile]
+type = "optional"
+placeholder = "my-aws-profile"
+label = "AWS profile (optional):"
+wizard = true
+
+[fields.prefix]
+type = "optional"
+placeholder = "fnox/"
+label = "Secret name prefix (optional):"
+wizard = true
+
+[fields.endpoint]
+type = "optional"
+placeholder = "http://localhost:4566"
+label = "Custom endpoint URL (optional):"

@@ -26,7 +26,7 @@ export default defineConfig({
   title: "fnox",
   description: "Fort Knox for your secrets",
   base: "/",
-  appearance: "dark",
+  appearance: "force-dark",
 
   themeConfig: {
     logo: "/logo.svg",
@@ -52,14 +52,29 @@ export default defineConfig({
         text: "Features",
         items: [
           { text: "Shell Integration", link: "/guide/shell-integration" },
+          { text: "Mise Integration", link: "/guide/mise-integration" },
+          { text: "TUI Dashboard", link: "/guide/tui" },
           { text: "Profiles", link: "/guide/profiles" },
           { text: "Hierarchical Config", link: "/guide/hierarchical-config" },
-          { text: "Local Overrides", link: "/guide/local-overrides" },
           {
             text: "Handling Missing Secrets",
             link: "/guide/missing-secrets",
           },
           { text: "Import/Export", link: "/guide/import-export" },
+          { text: "Syncing Secrets Locally", link: "/guide/sync" },
+          { text: "Credential Leases", link: "/guide/leases" },
+          { text: "MCP Server", link: "/guide/mcp" },
+        ],
+      },
+      {
+        text: "Lease Backends",
+        collapsed: true,
+        items: [
+          { text: "AWS STS", link: "/leases/aws-sts" },
+          { text: "GCP IAM", link: "/leases/gcp-iam" },
+          { text: "Azure Token", link: "/leases/azure-token" },
+          { text: "HashiCorp Vault", link: "/leases/vault" },
+          { text: "Custom Command", link: "/leases/command" },
         ],
       },
       {
@@ -70,38 +85,54 @@ export default defineConfig({
       },
       {
         text: "Providers",
-        items: [{ text: "Overview", link: "/providers/overview" }],
-      },
-      {
-        text: "Encryption (in git)",
         items: [
-          { text: "Age Encryption", link: "/providers/age" },
-          { text: "AWS KMS", link: "/providers/aws-kms" },
-          { text: "Azure Key Vault Keys", link: "/providers/azure-kms" },
-          { text: "Google Cloud KMS", link: "/providers/gcp-kms" },
-        ],
-      },
-      {
-        text: "Cloud Secret Storage",
-        items: [
-          { text: "AWS Secrets Manager", link: "/providers/aws-sm" },
-          { text: "Azure Key Vault Secrets", link: "/providers/azure-sm" },
-          { text: "GCP Secret Manager", link: "/providers/gcp-sm" },
-          { text: "HashiCorp Vault", link: "/providers/vault" },
-        ],
-      },
-      {
-        text: "Password Managers",
-        items: [
-          { text: "1Password", link: "/providers/1password" },
-          { text: "Bitwarden", link: "/providers/bitwarden" },
-        ],
-      },
-      {
-        text: "Local Storage",
-        items: [
-          { text: "OS Keychain", link: "/providers/keychain" },
-          { text: "Plain Text", link: "/providers/plain" },
+          { text: "Overview", link: "/providers/overview" },
+          {
+            text: "Encryption (in git)",
+            collapsed: true,
+            items: [
+              { text: "Age Encryption", link: "/providers/age" },
+              { text: "FIDO2", link: "/providers/fido2" },
+              { text: "YubiKey", link: "/providers/yubikey" },
+              { text: "AWS KMS", link: "/providers/aws-kms" },
+              { text: "Azure Key Vault Keys", link: "/providers/azure-kms" },
+              { text: "Google Cloud KMS", link: "/providers/gcp-kms" },
+            ],
+          },
+          {
+            text: "Cloud Secret Storage",
+            collapsed: true,
+            items: [
+              { text: "AWS Parameter Store", link: "/providers/aws-ps" },
+              { text: "AWS Secrets Manager", link: "/providers/aws-sm" },
+              { text: "Azure Key Vault Secrets", link: "/providers/azure-sm" },
+              { text: "GCP Secret Manager", link: "/providers/gcp-sm" },
+              {
+                text: "Bitwarden Secrets Manager",
+                link: "/providers/bitwarden-sm",
+              },
+              { text: "HashiCorp Vault", link: "/providers/vault" },
+            ],
+          },
+          {
+            text: "Password Managers & Secret Services",
+            collapsed: true,
+            items: [
+              { text: "1Password", link: "/providers/1password" },
+              { text: "Bitwarden", link: "/providers/bitwarden" },
+              { text: "Infisical", link: "/providers/infisical" },
+            ],
+          },
+          {
+            text: "Local Storage",
+            collapsed: true,
+            items: [
+              { text: "OS Keychain", link: "/providers/keychain" },
+              { text: "KeePass", link: "/providers/keepass" },
+              { text: "password-store", link: "/providers/password-store" },
+              { text: "Plain Text", link: "/providers/plain" },
+            ],
+          },
         ],
       },
       {
@@ -132,4 +163,17 @@ export default defineConfig({
       provider: "local",
     },
   },
+  head: [
+    ["meta", { property: "og:site_name", content: "fnox" }],
+    ["meta", { property: "og:type", content: "website" }],
+    [
+      "meta",
+      { property: "og:image", content: "https://fnox.jdx.dev/logo.png" },
+    ],
+    ["meta", { name: "twitter:card", content: "summary" }],
+    [
+      "meta",
+      { name: "twitter:image", content: "https://fnox.jdx.dev/logo.png" },
+    ],
+  ],
 });

@@ -1,7 +1,9 @@
 use crate::commands::Cli;
 use crate::config::Config;
 use crate::error::Result;
+use crate::secret_resolver::resolve_secrets_batch;
 use clap::Args;
+use indexmap::IndexMap;
 use tabled::settings::{
     Color, Format, Modify, Style, Width,
     object::{Columns, Rows},
@@ -90,9 +92,7 @@ impl ListCommand {
         tracing::debug!("Listing secrets in profile '{}'", profile);
 
         // Get the profile secrets
-        let profile_secrets = config
-            .get_secrets(&profile)
-            .map_err(|e| miette::miette!(e))?;
+        let profile_secrets = config.get_secrets(&profile)?;
 
         if profile_secrets.is_empty() {
             if !self.complete {
@@ -112,10 +112,21 @@ impl ListCommand {
             return Ok(());
         }
 
+        // Resolve secrets if values are requested
+        let resolved_values = if self.values {
+            Some(resolve_secrets_batch(&config, &profile, &profile_secrets).await?)
+        } else {
+            None
+        };
+
         if self.values && self.sources {
-            self.display_with_values_and_sources(&keys, &profile_secrets)?;
+            self.display_with_values_and_sources(
+                &keys,
+                &profile_secrets,
+                resolved_values.as_ref().unwrap(),
+            )?;
         } else if self.values {
-            self.display_with_values(&keys, &profile_secrets)?;
+            self.display_with_values(&keys, &profile_secrets, resolved_values.as_ref().unwrap())?;
         } else if self.sources {
             self.display_with_sources(&keys, &profile_secrets)?;
         } else {
@@ -129,21 +140,29 @@ impl ListCommand {
         &self,
         secret_config: &crate::config::SecretConfig,
     ) -> (String, String) {
-        if let Some(ref provider) = secret_config.provider {
-            let pk = secret_config.value.as_deref().unwrap_or("");
+        let (base_type, provider_key) = if let Some(provider) = secret_config.provider() {
+            let pk = secret_config.value().unwrap_or("");
             let pk_display = if !self.full && pk.len() > 40 {
                 format!("{}...", &pk[..37])
             } else {
                 pk.to_string()
             };
             (format!("provider ({})", provider), pk_display)
-        } else if secret_config.value.is_some() {
+        } else if secret_config.value().is_some() {
             ("stored value".to_string(), String::new())
         } else if secret_config.default.is_some() {
             ("default value".to_string(), String::new())
         } else {
             ("env var".to_string(), String::new())
-        }
+        };
+
+        let source_type = if secret_config.as_file {
+            format!("{} [file]", base_type)
+        } else {
+            base_type
+        };
+
+        (source_type, provider_key)
     }
 
     fn display_basic(
@@ -210,6 +229,7 @@ impl ListCommand {
         &self,
         keys: &[&String],
         profile_secrets: &indexmap::IndexMap<String, crate::config::SecretConfig>,
+        resolved_values: &IndexMap<String, Option<String>>,
     ) -> Result<()> {
         let mut rows = Vec::new();
         for key in keys {
@@ -221,7 +241,13 @@ impl ListCommand {
                 .as_deref()
                 .unwrap_or("")
                 .to_string();
-            let value_str = secret_config.default.as_ref().cloned().unwrap_or_default();
+
+            // Use the resolved value if available, otherwise show placeholder
+            let value_str = resolved_values
+                .get(*key)
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .unwrap_or_else(|| "<not available>".to_string());
 
             rows.push(SecretRowWithValues {
                 key: (*key).clone(),
@@ -239,6 +265,7 @@ impl ListCommand {
         &self,
         keys: &[&String],
         profile_secrets: &indexmap::IndexMap<String, crate::config::SecretConfig>,
+        resolved_values: &IndexMap<String, Option<String>>,
     ) -> Result<()> {
         let mut rows = Vec::new();
         for key in keys {
@@ -255,7 +282,13 @@ impl ListCommand {
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "unknown".to_string());
-            let value_str = secret_config.default.as_ref().cloned().unwrap_or_default();
+
+            // Use the resolved value if available, otherwise show placeholder
+            let value_str = resolved_values
+                .get(*key)
+                .and_then(|v| v.as_ref())
+                .cloned()
+                .unwrap_or_else(|| "<not available>".to_string());
 
             rows.push(SecretRowWithValuesAndSources {
                 key: (*key).clone(),

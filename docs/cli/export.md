@@ -2,7 +2,7 @@
 
 # `fnox export`
 
-- **Usage**: `fnox export [-f --format <FORMAT>] [-o --output <OUTPUT>]`
+- **Usage**: `fnox export [FLAGS]`
 - **Aliases**: `ex`
 
 Export secrets in various formats
@@ -19,6 +19,12 @@ Export format
 - `json`
 - `yaml`
 - `toml`
+
+**Default:** `env`
+
+### `-n --dry-run`
+
+Show what would be exported without writing to file
 
 ### `-o --output <OUTPUT>`
 

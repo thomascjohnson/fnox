@@ -1,5 +1,624 @@
 # Changelog
 
+## [1.19.0](https://github.com/jdx/fnox/compare/v1.18.0..v1.19.0) - 2026-03-22
+
+### 🚀 Features
+
+- add `reencrypt` subcommand for updating encryption recipients by [@jdx](https://github.com/jdx) in [#365](https://github.com/jdx/fnox/pull/365)
+
+### 🐛 Bug Fixes
+
+- **(set)** prompt for secret value when -k flag is used by [@jdx](https://github.com/jdx) in [#367](https://github.com/jdx/fnox/pull/367)
+
+### 📦️ Dependency Updates
+
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#360](https://github.com/jdx/fnox/pull/360)
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#362](https://github.com/jdx/fnox/pull/362)
+
+## [1.18.0](https://github.com/jdx/fnox/compare/v1.17.0..v1.18.0) - 2026-03-13
+
+### 🚀 Features
+
+- **(mcp)** add secret allowlist to limit agent access by [@jdx](https://github.com/jdx) in [#358](https://github.com/jdx/fnox/pull/358)
+- **(sync)** add --local-file output target by [@florian-lackner365](https://github.com/florian-lackner365) in [#317](https://github.com/jdx/fnox/pull/317)
+
+### 🐛 Bug Fixes
+
+- properly handle auth prompt in batch providers by [@johnpyp](https://github.com/johnpyp) in [#349](https://github.com/jdx/fnox/pull/349)
+
+### 🚜 Refactor
+
+- **(yubikey)** dynamically load libusb at runtime by [@jdx](https://github.com/jdx) in [#348](https://github.com/jdx/fnox/pull/348)
+
+### 🛡️ Security
+
+- **(mcp)** redact secret values from exec output by [@jdx](https://github.com/jdx) in [#357](https://github.com/jdx/fnox/pull/357)
+
+### 📦️ Dependency Updates
+
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#344](https://github.com/jdx/fnox/pull/344)
+- update jdx/mise-action digest to 5228313 by [@renovate[bot]](https://github.com/renovate[bot]) in [#351](https://github.com/jdx/fnox/pull/351)
+- update swatinem/rust-cache digest to e18b497 by [@renovate[bot]](https://github.com/renovate[bot]) in [#352](https://github.com/jdx/fnox/pull/352)
+- update taiki-e/upload-rust-binary-action digest to 381995c by [@renovate[bot]](https://github.com/renovate[bot]) in [#353](https://github.com/jdx/fnox/pull/353)
+- update dependency vue to v3.5.30 by [@renovate[bot]](https://github.com/renovate[bot]) in [#354](https://github.com/jdx/fnox/pull/354)
+- update rust crate openssl-sys to v0.9.112 by [@renovate[bot]](https://github.com/renovate[bot]) in [#355](https://github.com/jdx/fnox/pull/355)
+- update rust crate clap to v4.6.0 by [@renovate[bot]](https://github.com/renovate[bot]) in [#356](https://github.com/jdx/fnox/pull/356)
+
+### New Contributors
+
+- @florian-lackner365 made their first contribution in [#317](https://github.com/jdx/fnox/pull/317)
+
+## [1.17.0](https://github.com/jdx/fnox/compare/v1.16.1..v1.17.0) - 2026-03-09
+
+### 🚀 Features
+
+- **(cloudflare)** add Cloudflare API token lease backend by [@jdx](https://github.com/jdx) in [#335](https://github.com/jdx/fnox/pull/335)
+- **(fido2)** bump demand to v2, mask PIN during typing by [@jdx](https://github.com/jdx) in [#334](https://github.com/jdx/fnox/pull/334)
+- **(get)** resolve leased credentials from `fnox get` by [@jdx](https://github.com/jdx) in [#338](https://github.com/jdx/fnox/pull/338)
+- **(init)** add -f as short alias for --force by [@jdx](https://github.com/jdx) in [#329](https://github.com/jdx/fnox/pull/329)
+- **(lease)** add --all flag, default to creating all leases by [@jdx](https://github.com/jdx) in [#337](https://github.com/jdx/fnox/pull/337)
+- **(lease)** add GitHub App installation token lease backend by [@jdx](https://github.com/jdx) in [#342](https://github.com/jdx/fnox/pull/342)
+
+### 🐛 Bug Fixes
+
+- **(config)** fix directory locations to follow XDG spec by [@jdx](https://github.com/jdx) in [#336](https://github.com/jdx/fnox/pull/336)
+- **(exec)** use unix exec and exit silently on subprocess failure by [@jdx](https://github.com/jdx) in [#339](https://github.com/jdx/fnox/pull/339)
+- **(fido2)** remove duplicate touch prompt by [@jdx](https://github.com/jdx) in [#332](https://github.com/jdx/fnox/pull/332)
+- **(set)** write to lowest-priority existing config file by [@jdx](https://github.com/jdx) in [#331](https://github.com/jdx/fnox/pull/331)
+- **(tui)** skip providers requiring interactive auth by [@jdx](https://github.com/jdx) in [#333](https://github.com/jdx/fnox/pull/333)
+
+### 🛡️ Security
+
+- **(ci)** retry lint step to handle transient pkl fetch failures by [@jdx](https://github.com/jdx) in [#341](https://github.com/jdx/fnox/pull/341)
+- **(mcp)** add MCP server for secret-gated AI agent access by [@jdx](https://github.com/jdx) in [#343](https://github.com/jdx/fnox/pull/343)
+- add guide for fnox sync by [@jdx](https://github.com/jdx) in [#328](https://github.com/jdx/fnox/pull/328)
+
+### 🔍 Other Changes
+
+- share Rust cache across CI jobs by [@jdx](https://github.com/jdx) in [#340](https://github.com/jdx/fnox/pull/340)
+
+## [1.16.1](https://github.com/jdx/fnox/compare/v1.16.0..v1.16.1) - 2026-03-08
+
+### 🐛 Bug Fixes
+
+- **(set)** error on encryption failure; use LocalStack for AWS tests by [@jdx](https://github.com/jdx) in [#324](https://github.com/jdx/fnox/pull/324)
+
+### 📦️ Dependency Updates
+
+- add Cross.toml to install libudev-dev for linux cross-compilation by [@jdx](https://github.com/jdx) in [#326](https://github.com/jdx/fnox/pull/326)
+
+## [1.16.0](https://github.com/jdx/fnox/compare/v1.15.1..v1.16.0) - 2026-03-08
+
+### 🐛 Bug Fixes
+
+- **(docs)** escape angle brackets in lease create doc by [@jdx](https://github.com/jdx) in [#323](https://github.com/jdx/fnox/pull/323)
+
+### 🛡️ Security
+
+- **(lease)** ephemeral credential leasing by [@jdx](https://github.com/jdx) in [#318](https://github.com/jdx/fnox/pull/318)
+
+### 📦️ Dependency Updates
+
+- update jdx/mise-action digest to e79ddf6 by [@renovate[bot]](https://github.com/renovate[bot]) in [#312](https://github.com/jdx/fnox/pull/312)
+- publish to crates.io on release by [@jdx](https://github.com/jdx) in [#315](https://github.com/jdx/fnox/pull/315)
+- add libudev-dev to release-plz CI workflow by [@jdx](https://github.com/jdx) in [#322](https://github.com/jdx/fnox/pull/322)
+- update aws-sdk-rust monorepo to v1.8.15 by [@renovate[bot]](https://github.com/renovate[bot]) in [#313](https://github.com/jdx/fnox/pull/313)
+
+## [1.15.1](https://github.com/jdx/fnox/compare/v1.15.0..v1.15.1) - 2026-03-02
+
+### 🐛 Bug Fixes
+
+- **(sync)** use sync cache field instead of overwriting provider/value by [@jdx](https://github.com/jdx) in [#309](https://github.com/jdx/fnox/pull/309)
+
+### ⚡ Performance
+
+- **(aws-sm)** skip expensive tests on non-release PRs by [@jdx](https://github.com/jdx) in [#310](https://github.com/jdx/fnox/pull/310)
+- **(provider)** use async tokio::process::Command for CLI-based providers by [@jdx](https://github.com/jdx) in [#308](https://github.com/jdx/fnox/pull/308)
+
+### 📦️ Dependency Updates
+
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#306](https://github.com/jdx/fnox/pull/306)
+
+## [1.15.0](https://github.com/jdx/fnox/compare/v1.14.0..v1.15.0) - 2026-03-02
+
+### 🚀 Features
+
+- **(provider)** allow auth_command override per-provider in config by [@jdx](https://github.com/jdx) in [#305](https://github.com/jdx/fnox/pull/305)
+- **(vault)** make address field optional and fallback to VAULT_ADDR by [@chermed](https://github.com/chermed) in [#301](https://github.com/jdx/fnox/pull/301)
+- add `fnox sync` command by [@jdx](https://github.com/jdx) in [#298](https://github.com/jdx/fnox/pull/298)
+- nushell integration by [@tiptenbrink](https://github.com/tiptenbrink) in [#304](https://github.com/jdx/fnox/pull/304)
+
+### 🐛 Bug Fixes
+
+- **(provider)** only trigger auth prompt for ProviderAuthFailed errors by [@TyceHerrman](https://github.com/TyceHerrman) in [#297](https://github.com/jdx/fnox/pull/297)
+- **(provider)** add missing provider add types and proton-pass vault by [@TyceHerrman](https://github.com/TyceHerrman) in [#302](https://github.com/jdx/fnox/pull/302)
+
+### New Contributors
+
+- @chermed made their first contribution in [#301](https://github.com/jdx/fnox/pull/301)
+- @tiptenbrink made their first contribution in [#304](https://github.com/jdx/fnox/pull/304)
+
+## [1.14.0](https://github.com/jdx/fnox/compare/v1.13.0..v1.14.0) - 2026-02-28
+
+### 🚀 Features
+
+- **(proton-pass)** add Proton Pass provider by [@TyceHerrman](https://github.com/TyceHerrman) in [#292](https://github.com/jdx/fnox/pull/292)
+- Add AWS Profile support for AWS PS and Secrets Manager in provider config by [@micahvdk](https://github.com/micahvdk) in [#290](https://github.com/jdx/fnox/pull/290)
+- encode decode secrets by [@pitoniak32](https://github.com/pitoniak32) in [#273](https://github.com/jdx/fnox/pull/273)
+
+### 🐛 Bug Fixes
+
+- **(aws-sm)** deduplicate secret IDs in batch requests by [@jdx](https://github.com/jdx) in [#296](https://github.com/jdx/fnox/pull/296)
+
+### 📚 Documentation
+
+- require AI disclosure on GitHub comments by [@jdx](https://github.com/jdx) in [#288](https://github.com/jdx/fnox/pull/288)
+
+### 📦️ Dependency Updates
+
+- update dependency vue to v3.5.29 by [@renovate[bot]](https://github.com/renovate[bot]) in [#294](https://github.com/jdx/fnox/pull/294)
+- update rust crate chrono to v0.4.44 by [@renovate[bot]](https://github.com/renovate[bot]) in [#295](https://github.com/jdx/fnox/pull/295)
+
+### New Contributors
+
+- @pitoniak32 made their first contribution in [#273](https://github.com/jdx/fnox/pull/273)
+- @TyceHerrman made their first contribution in [#292](https://github.com/jdx/fnox/pull/292)
+- @micahvdk made their first contribution in [#290](https://github.com/jdx/fnox/pull/290)
+
+## [1.13.0](https://github.com/jdx/fnox/compare/v1.12.1..v1.13.0) - 2026-02-21
+
+### 🚀 Features
+
+- add JSON secrets by [@halms](https://github.com/halms) in [#247](https://github.com/jdx/fnox/pull/247)
+
+### 🐛 Bug Fixes
+
+- **(config)** preserve TOML comments in import and remove by [@jdx](https://github.com/jdx) in [#268](https://github.com/jdx/fnox/pull/268)
+- **(release)** write release notes to file instead of capturing stdout by [@jdx](https://github.com/jdx) in [#263](https://github.com/jdx/fnox/pull/263)
+- **(release)** make release notes editorialization non-blocking by [@jdx](https://github.com/jdx) in [#269](https://github.com/jdx/fnox/pull/269)
+
+### 📚 Documentation
+
+- **(config)** fix env-specific config example in mise integration guide by [@jdx](https://github.com/jdx) in [#267](https://github.com/jdx/fnox/pull/267)
+- **(shell)** remove incorrect `cd .` reload instructions by [@jdx](https://github.com/jdx) in [#265](https://github.com/jdx/fnox/pull/265)
+- rename CRUSH.md to AGENTS.md by [@sweepies](https://github.com/sweepies) in [#282](https://github.com/jdx/fnox/pull/282)
+
+### 🔍 Other Changes
+
+- replace gen-release-notes script with communique by [@jdx](https://github.com/jdx) in [#285](https://github.com/jdx/fnox/pull/285)
+
+### 📦️ Dependency Updates
+
+- update taiki-e/upload-rust-binary-action digest to f391289 by [@renovate[bot]](https://github.com/renovate[bot]) in [#274](https://github.com/jdx/fnox/pull/274)
+- update rust crate usage-lib to v2.16.2 by [@renovate[bot]](https://github.com/renovate[bot]) in [#277](https://github.com/jdx/fnox/pull/277)
+- update rust crate clap to v4.5.58 by [@renovate[bot]](https://github.com/renovate[bot]) in [#276](https://github.com/jdx/fnox/pull/276)
+- update rust crate google-cloud-secretmanager-v1 to v1.5.0 by [@renovate[bot]](https://github.com/renovate[bot]) in [#278](https://github.com/jdx/fnox/pull/278)
+- update rust crate crossterm to 0.29 by [@renovate[bot]](https://github.com/renovate[bot]) in [#279](https://github.com/jdx/fnox/pull/279)
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#281](https://github.com/jdx/fnox/pull/281)
+- update aws-sdk-rust monorepo to v1.8.14 by [@renovate[bot]](https://github.com/renovate[bot]) in [#275](https://github.com/jdx/fnox/pull/275)
+- update keepass to 0.8.21 and adapt to new API by [@jdx](https://github.com/jdx) in [#286](https://github.com/jdx/fnox/pull/286)
+
+### New Contributors
+
+- @sweepies made their first contribution in [#282](https://github.com/jdx/fnox/pull/282)
+- @halms made their first contribution in [#247](https://github.com/jdx/fnox/pull/247)
+
+## [1.12.1](https://github.com/jdx/fnox/compare/v1.12.0..v1.12.1) - 2026-02-10
+
+### 🐛 Bug Fixes
+
+- load global config in shell integration hook-env by [@jdx](https://github.com/jdx) in [#262](https://github.com/jdx/fnox/pull/262)
+
+### 📚 Documentation
+
+- condense CLAUDE.md from 1159 to 96 lines by [@jdx](https://github.com/jdx) in [#260](https://github.com/jdx/fnox/pull/260)
+
+### 🛡️ Security
+
+- disable light mode in documentation site by [@jdx](https://github.com/jdx) in [#261](https://github.com/jdx/fnox/pull/261)
+
+### 📦️ Dependency Updates
+
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#257](https://github.com/jdx/fnox/pull/257)
+
+## [1.12.0](https://github.com/jdx/fnox/compare/v1.11.0..v1.12.0) - 2026-02-09
+
+### 🚀 Features
+
+- implement as_file to inject a secret as a file instead of as a value by [@kfkonrad](https://github.com/kfkonrad) in [#250](https://github.com/jdx/fnox/pull/250)
+- add a `--no-defaults` CLI flag by [@jaydenfyi](https://github.com/jaydenfyi) in [#252](https://github.com/jdx/fnox/pull/252)
+
+### 📚 Documentation
+
+- document tools=true requirement for mise integration by [@jdx](https://github.com/jdx) in [#245](https://github.com/jdx/fnox/pull/245)
+- add opengraph meta tags by [@jdx](https://github.com/jdx) in [#256](https://github.com/jdx/fnox/pull/256)
+
+### 🔍 Other Changes
+
+- reduce CI bats test parallelism from 3 to 2 tranches by [@jdx](https://github.com/jdx) in [#243](https://github.com/jdx/fnox/pull/243)
+- add tone calibration to release notes prompt by [@jdx](https://github.com/jdx) in [#251](https://github.com/jdx/fnox/pull/251)
+- Add Bitwarden SM provider by [@nikuda](https://github.com/nikuda) in [#253](https://github.com/jdx/fnox/pull/253)
+
+### 📦️ Dependency Updates
+
+- update autofix-ci/action action to v1.3.3 by [@renovate[bot]](https://github.com/renovate[bot]) in [#254](https://github.com/jdx/fnox/pull/254)
+- update aws-sdk-rust monorepo to v1.8.13 by [@renovate[bot]](https://github.com/renovate[bot]) in [#255](https://github.com/jdx/fnox/pull/255)
+
+### New Contributors
+
+- @nikuda made their first contribution in [#253](https://github.com/jdx/fnox/pull/253)
+- @jaydenfyi made their first contribution in [#252](https://github.com/jdx/fnox/pull/252)
+- @kfkonrad made their first contribution in [#250](https://github.com/jdx/fnox/pull/250)
+
+## [1.11.0](https://github.com/jdx/fnox/compare/v1.10.1..v1.11.0) - 2026-02-01
+
+### 🚀 Features
+
+- add `config-files` subcommand by [@jdx](https://github.com/jdx) in [#238](https://github.com/jdx/fnox/pull/238)
+
+### 🧪 Testing
+
+- **(bitwarden)** serialize tests to prevent flaky CI failures by [@jdx](https://github.com/jdx) in [#242](https://github.com/jdx/fnox/pull/242)
+- add unit tests for dependency resolution level computation by [@jdx](https://github.com/jdx) in [#239](https://github.com/jdx/fnox/pull/239)
+
+## [1.10.1](https://github.com/jdx/fnox/compare/v1.10.0..v1.10.1) - 2026-01-30
+
+### 🐛 Bug Fixes
+
+- **(exec)** resolve secrets in dependency order using Kahn's algorithm by [@jdx](https://github.com/jdx) in [#237](https://github.com/jdx/fnox/pull/237)
+- don't thank @jdx in LLM-generated release notes by [@jdx](https://github.com/jdx) in [#230](https://github.com/jdx/fnox/pull/230)
+
+### 📚 Documentation
+
+- add conventional commit guidance to CRUSH.md by [@jdx](https://github.com/jdx) in [#226](https://github.com/jdx/fnox/pull/226)
+- clarify fix type is for CLI bugs only by [@jdx](https://github.com/jdx) in [#231](https://github.com/jdx/fnox/pull/231)
+
+### 🛡️ Security
+
+- **(set)** add security guidance for secret value argument by [@jdx](https://github.com/jdx) in [#229](https://github.com/jdx/fnox/pull/229)
+
+### 🔍 Other Changes
+
+- add creative titles to GitHub releases by [@jdx](https://github.com/jdx) in [#224](https://github.com/jdx/fnox/pull/224)
+- add mise.local.toml to .gitignore by [@jdx](https://github.com/jdx) in [#236](https://github.com/jdx/fnox/pull/236)
+
+### 📦️ Dependency Updates
+
+- update rust crate clap to v4.5.56 by [@renovate[bot]](https://github.com/renovate[bot]) in [#234](https://github.com/jdx/fnox/pull/234)
+- update rust crate google-cloud-secretmanager-v1 to v1.4.0 by [@renovate[bot]](https://github.com/renovate[bot]) in [#235](https://github.com/jdx/fnox/pull/235)
+
+## [1.10.0](https://github.com/jdx/fnox/compare/v1.9.2..v1.10.0) - 2026-01-25
+
+### 🚀 Features
+
+- **(1password)** add token field supporting secret references by [@jdx](https://github.com/jdx) in [#200](https://github.com/jdx/fnox/pull/200)
+- **(vault)** add namespace option by [@pierrop](https://github.com/pierrop) in [#220](https://github.com/jdx/fnox/pull/220)
+- add JSON schema for fnox.toml by [@jdx](https://github.com/jdx) in [#196](https://github.com/jdx/fnox/pull/196)
+- add --all flag to provider test command by [@jdx](https://github.com/jdx) in [#202](https://github.com/jdx/fnox/pull/202)
+- add documentation URLs to error diagnostics by [@jdx](https://github.com/jdx) in [#212](https://github.com/jdx/fnox/pull/212)
+- preserve source error chains for JSON/YAML errors by [@jdx](https://github.com/jdx) in [#214](https://github.com/jdx/fnox/pull/214)
+- use structured error variants instead of generic Config/Provider by [@jdx](https://github.com/jdx) in [#213](https://github.com/jdx/fnox/pull/213)
+- add "Did you mean?" suggestions for typos by [@jdx](https://github.com/jdx) in [#204](https://github.com/jdx/fnox/pull/204)
+- add --dry-run flag to data-modifying commands by [@jdx](https://github.com/jdx) in [#201](https://github.com/jdx/fnox/pull/201)
+- Support fnox.toml (and variants) dotfiles. by [@dharrigan](https://github.com/dharrigan) in [#141](https://github.com/jdx/fnox/pull/141)
+- add source code spans for better error reporting by [@jdx](https://github.com/jdx) in [#205](https://github.com/jdx/fnox/pull/205)
+- use #[related] for validation errors to show all issues at once by [@jdx](https://github.com/jdx) in [#211](https://github.com/jdx/fnox/pull/211)
+- add source code span tracking for default_provider errors by [@jdx](https://github.com/jdx) in [#209](https://github.com/jdx/fnox/pull/209)
+- add source code span tracking for SecretConfig.value by [@jdx](https://github.com/jdx) in [#210](https://github.com/jdx/fnox/pull/210)
+- improve miette error handling with structured provider errors and URLs by [@jdx](https://github.com/jdx) in [#216](https://github.com/jdx/fnox/pull/216)
+
+### 🐛 Bug Fixes
+
+- update claude CLI model and add bypassPermissions by [@jdx](https://github.com/jdx) in [#194](https://github.com/jdx/fnox/pull/194)
+- update claude CLI model and add bypassPermissions by [@jdx](https://github.com/jdx) in [#195](https://github.com/jdx/fnox/pull/195)
+- preserve TOML comments in `fnox set` by [@jdx](https://github.com/jdx) in [#223](https://github.com/jdx/fnox/pull/223)
+
+### 🚜 Refactor
+
+- convert miette::miette!() to FnoxError in encrypt.rs and list.rs by [@jdx](https://github.com/jdx) in [#208](https://github.com/jdx/fnox/pull/208)
+- use structured errors in remove and export commands by [@jdx](https://github.com/jdx) in [#206](https://github.com/jdx/fnox/pull/206)
+- use structured errors in import command by [@jdx](https://github.com/jdx) in [#207](https://github.com/jdx/fnox/pull/207)
+
+### 📚 Documentation
+
+- add comprehensive TUI dashboard guide by [@jdx](https://github.com/jdx) in [#203](https://github.com/jdx/fnox/pull/203)
+- add mise integration guide by [@jdx](https://github.com/jdx) in [#215](https://github.com/jdx/fnox/pull/215)
+
+### ⚡ Performance
+
+- reduce KMS API calls in CI tests by [@jdx](https://github.com/jdx) in [#217](https://github.com/jdx/fnox/pull/217)
+
+### 🛡️ Security
+
+- add Black Ops One font branding to docs by [@jdx](https://github.com/jdx) in [#198](https://github.com/jdx/fnox/pull/198)
+
+### 📦️ Dependency Updates
+
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#197](https://github.com/jdx/fnox/pull/197)
+- update jdx/mise-action digest to 6d1e696 by [@renovate[bot]](https://github.com/renovate[bot]) in [#218](https://github.com/jdx/fnox/pull/218)
+- update rust crate proc-macro2 to v1.0.106 by [@renovate[bot]](https://github.com/renovate[bot]) in [#219](https://github.com/jdx/fnox/pull/219)
+
+### New Contributors
+
+- @pierrop made their first contribution in [#220](https://github.com/jdx/fnox/pull/220)
+- @dharrigan made their first contribution in [#141](https://github.com/jdx/fnox/pull/141)
+
+## [1.9.2](https://github.com/jdx/fnox/compare/v1.9.1..v1.9.2) - 2026-01-19
+
+### 🚀 Features
+
+- add interactive TUI dashboard using ratatui by [@jdx](https://github.com/jdx) in [#188](https://github.com/jdx/fnox/pull/188)
+
+### 🐛 Bug Fixes
+
+- gen-release-notes improvements by [@jdx](https://github.com/jdx) in [#191](https://github.com/jdx/fnox/pull/191)
+
+### 🔍 Other Changes
+
+- exclude CHANGELOG.md from prettier by [@jdx](https://github.com/jdx) in [#190](https://github.com/jdx/fnox/pull/190)
+
+## [1.9.1](https://github.com/jdx/fnox/compare/v1.9.0..v1.9.1) - 2026-01-19
+
+### 🐛 Bug Fixes
+
+- use positional args in gen-release-notes by [@jdx](https://github.com/jdx) in [#187](https://github.com/jdx/fnox/pull/187)
+
+## [1.9.0](https://github.com/jdx/fnox/compare/v1.8.0..v1.9.0) - 2026-01-19
+
+### 🚀 Features
+
+- add authentication prompting for expired credentials by [@jdx](https://github.com/jdx) in [#184](https://github.com/jdx/fnox/pull/184)
+- add LLM-generated editorialized release notes by [@jdx](https://github.com/jdx) in [#185](https://github.com/jdx/fnox/pull/185)
+
+### 🐛 Bug Fixes
+
+- remove LLM generation from release-plz by [@jdx](https://github.com/jdx) in [#186](https://github.com/jdx/fnox/pull/186)
+
+### 🚜 Refactor
+
+- **(edit)** batch resolve secrets by profile for efficiency by [@johnpyp](https://github.com/johnpyp) in [#182](https://github.com/jdx/fnox/pull/182)
+
+## [1.8.0](https://github.com/jdx/fnox/compare/v1.7.0..v1.8.0) - 2026-01-17
+
+### 🚀 Features
+
+- add passwordstate provider by [@davidolrik](https://github.com/davidolrik) in [#147](https://github.com/jdx/fnox/pull/147)
+- aws-ps batch concurrency, aws-kms 10 -> 100 concurrency by [@johnpyp](https://github.com/johnpyp) in [#180](https://github.com/jdx/fnox/pull/180)
+
+### 🐛 Bug Fixes
+
+- resolve clippy unused_assignments warnings in error.rs by [@jdx](https://github.com/jdx) in [#174](https://github.com/jdx/fnox/pull/174)
+- improve AWS SDK error messages and enable SSO support by [@daghoidahl](https://github.com/daghoidahl) in [#173](https://github.com/jdx/fnox/pull/173)
+
+### 📚 Documentation
+
+- add AWS Parameter store to sidebar and provider lists by [@johnpyp](https://github.com/johnpyp) in [#178](https://github.com/jdx/fnox/pull/178)
+
+### 🧪 Testing
+
+- Add missing skip logic to aws_parameter_store.bats by [@jdx](https://github.com/jdx) in [#145](https://github.com/jdx/fnox/pull/145)
+
+### 🛡️ Security
+
+- **(deps)** update azure-sdk-for-rust monorepo to 0.30 by [@renovate[bot]](https://github.com/renovate[bot]) in [#144](https://github.com/jdx/fnox/pull/144)
+
+### 📦️ Dependency Updates
+
+- pin dependencies by [@renovate[bot]](https://github.com/renovate[bot]) in [#133](https://github.com/jdx/fnox/pull/133)
+- update rust crate demand to v1.8.0 by [@renovate[bot]](https://github.com/renovate[bot]) in [#134](https://github.com/jdx/fnox/pull/134)
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#137](https://github.com/jdx/fnox/pull/137)
+- update rust crate usage-lib to v2.9.0 by [@renovate[bot]](https://github.com/renovate[bot]) in [#143](https://github.com/jdx/fnox/pull/143)
+- update rust crate age to v0.11.2 by [@renovate[bot]](https://github.com/renovate[bot]) in [#149](https://github.com/jdx/fnox/pull/149)
+- update aws-sdk-rust monorepo to v1.8.12 by [@renovate[bot]](https://github.com/renovate[bot]) in [#148](https://github.com/jdx/fnox/pull/148)
+- update rust crate gcp_auth to v0.12.5 by [@renovate[bot]](https://github.com/renovate[bot]) in [#151](https://github.com/jdx/fnox/pull/151)
+- update rust crate dbus to v0.9.10 by [@renovate[bot]](https://github.com/renovate[bot]) in [#150](https://github.com/jdx/fnox/pull/150)
+- update rust crate google-cloud-secretmanager-v1 to v1.2.0 by [@renovate[bot]](https://github.com/renovate[bot]) in [#153](https://github.com/jdx/fnox/pull/153)
+- update rust crate reqwest to v0.12.25 by [@renovate[bot]](https://github.com/renovate[bot]) in [#152](https://github.com/jdx/fnox/pull/152)
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#154](https://github.com/jdx/fnox/pull/154)
+- update dependency vue to v3.5.26 by [@renovate[bot]](https://github.com/renovate[bot]) in [#156](https://github.com/jdx/fnox/pull/156)
+- update rust crate console to v0.16.2 by [@renovate[bot]](https://github.com/renovate[bot]) in [#157](https://github.com/jdx/fnox/pull/157)
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#162](https://github.com/jdx/fnox/pull/162)
+- update rust crate arc-swap to v1.8.0 by [@renovate[bot]](https://github.com/renovate[bot]) in [#167](https://github.com/jdx/fnox/pull/167)
+- update rust crate chrono to v0.4.43 by [@renovate[bot]](https://github.com/renovate[bot]) in [#176](https://github.com/jdx/fnox/pull/176)
+- update aws-sdk-rust monorepo to v1.98.0 by [@renovate[bot]](https://github.com/renovate[bot]) in [#177](https://github.com/jdx/fnox/pull/177)
+
+### New Contributors
+
+- @johnpyp made their first contribution in [#180](https://github.com/jdx/fnox/pull/180)
+- @daghoidahl made their first contribution in [#173](https://github.com/jdx/fnox/pull/173)
+- @davidolrik made their first contribution in [#147](https://github.com/jdx/fnox/pull/147)
+
+## [1.7.0](https://github.com/jdx/fnox/compare/v1.6.1..v1.7.0) - 2025-11-27
+
+### 🚀 Features
+
+- **(init)** improve wizard with traits and missing providers by [@jdx](https://github.com/jdx) in [#129](https://github.com/jdx/fnox/pull/129)
+- add KeePass provider support by [@jdx](https://github.com/jdx) in [#123](https://github.com/jdx/fnox/pull/123)
+- add AWS Parameter Store provider support by [@jdx](https://github.com/jdx) in [#126](https://github.com/jdx/fnox/pull/126)
+- support global config file for machine-wide secrets by [@jdx](https://github.com/jdx) in [#128](https://github.com/jdx/fnox/pull/128)
+- add secret references in provider configuration by [@jdx](https://github.com/jdx) in [#131](https://github.com/jdx/fnox/pull/131)
+
+### 🐛 Bug Fixes
+
+- **(set)** always write to local config, create override for parent secrets by [@jdx](https://github.com/jdx) in [#122](https://github.com/jdx/fnox/pull/122)
+
+### 🚜 Refactor
+
+- simplify Provider trait by removing key_file parameter by [@jdx](https://github.com/jdx) in [#124](https://github.com/jdx/fnox/pull/124)
+
+### 📚 Documentation
+
+- add KeePass provider documentation by [@jdx](https://github.com/jdx) in [#125](https://github.com/jdx/fnox/pull/125)
+
+### ⚡ Performance
+
+- **(tests)** reduce AWS Secrets Manager API calls by [@jdx](https://github.com/jdx) in [#127](https://github.com/jdx/fnox/pull/127)
+
+## [1.6.1](https://github.com/jdx/fnox/compare/v1.6.0..v1.6.1) - 2025-11-26
+
+### 🐛 Bug Fixes
+
+- **(edit)** preserve all user edits including non-secret config by [@jdx](https://github.com/jdx) in [#119](https://github.com/jdx/fnox/pull/119)
+
+### 🚜 Refactor
+
+- **(age)** use age crate for encryption instead of CLI by [@KokaKiwi](https://github.com/KokaKiwi) in [#112](https://github.com/jdx/fnox/pull/112)
+- **(password-store)** implement Provider trait with put_secret returning key by [@KokaKiwi](https://github.com/KokaKiwi) in [#117](https://github.com/jdx/fnox/pull/117)
+
+### 📚 Documentation
+
+- add password-store provider documentation by [@KokaKiwi](https://github.com/KokaKiwi) in [#111](https://github.com/jdx/fnox/pull/111)
+
+### 📦️ Dependency Updates
+
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#113](https://github.com/jdx/fnox/pull/113)
+- lock file maintenance by [@renovate[bot]](https://github.com/renovate[bot]) in [#114](https://github.com/jdx/fnox/pull/114)
+
+### New Contributors
+
+- @renovate[bot] made their first contribution in [#114](https://github.com/jdx/fnox/pull/114)
+
+## [1.6.0](https://github.com/jdx/fnox/compare/v1.5.2..v1.6.0) - 2025-11-21
+
+### 🚀 Features
+
+- add password-store provider with GPG-encrypted local storage by [@KokaKiwi](https://github.com/KokaKiwi) in [#102](https://github.com/jdx/fnox/pull/102)
+
+### 🐛 Bug Fixes
+
+- prevent config hierarchy duplication in fnox set command by [@jdx](https://github.com/jdx) in [#107](https://github.com/jdx/fnox/pull/107)
+- preserve newly created profile sections in edit command by [@jdx](https://github.com/jdx) in [#108](https://github.com/jdx/fnox/pull/108)
+
+### 📚 Documentation
+
+- add looping example for age provider by [@Lailanater](https://github.com/Lailanater) in [#106](https://github.com/jdx/fnox/pull/106)
+
+### New Contributors
+
+- @Lailanater made their first contribution in [#106](https://github.com/jdx/fnox/pull/106)
+- @KokaKiwi made their first contribution in [#102](https://github.com/jdx/fnox/pull/102)
+
+## [1.5.2](https://github.com/jdx/fnox/compare/v1.5.1..v1.5.2) - 2025-11-19
+
+### 🐛 Bug Fixes
+
+- **(ci)** vendor dbus dependency for cross-compilation by [@jdx](https://github.com/jdx) in [#99](https://github.com/jdx/fnox/pull/99)
+
+## [1.5.1](https://github.com/jdx/fnox/compare/v1.5.0..v1.5.1) - 2025-11-18
+
+### 🐛 Bug Fixes
+
+- **(ci)** configure dbus dependencies for cross-compilation by [@jdx](https://github.com/jdx) in [#97](https://github.com/jdx/fnox/pull/97)
+
+## [1.5.0](https://github.com/jdx/fnox/compare/v1.4.0..v1.5.0) - 2025-11-18
+
+### 🚀 Features
+
+- **(bitwarden)** rbw support (experimental) by [@nilleb](https://github.com/nilleb) in [#91](https://github.com/jdx/fnox/pull/91)
+
+### 🐛 Bug Fixes
+
+- **(ci)** bitwarden setup by [@nilleb](https://github.com/nilleb) in [#92](https://github.com/jdx/fnox/pull/92)
+- **(ci)** install dbus dependencies for release workflow by [@jdx](https://github.com/jdx) in [#96](https://github.com/jdx/fnox/pull/96)
+
+## [1.4.0](https://github.com/jdx/fnox/compare/v1.3.0..v1.4.0) - 2025-11-15
+
+### 🚀 Features
+
+- **(bitwarden)** specify profile by [@nilleb](https://github.com/nilleb) in [#90](https://github.com/jdx/fnox/pull/90)
+
+### 🐛 Bug Fixes
+
+- **(ci)** make final job fail if any dependencies fail by [@jdx](https://github.com/jdx) in [#74](https://github.com/jdx/fnox/pull/74)
+- **(ci)** install dbus dependencies for autofix and release-plz workflows by [@jdx](https://github.com/jdx) in [#89](https://github.com/jdx/fnox/pull/89)
+- **(docs)** imports -> import by [@lttb](https://github.com/lttb) in [#84](https://github.com/jdx/fnox/pull/84)
+- **(edit)** add .toml extension, decrypt secrets properly, and support adding new secrets by [@jdx](https://github.com/jdx) in [#88](https://github.com/jdx/fnox/pull/88)
+- **(keychain)** use Secret Service backend for Linux by [@jdx](https://github.com/jdx) in [#86](https://github.com/jdx/fnox/pull/86)
+- respect --profile/-P CLI flag when loading config files by [@jdx](https://github.com/jdx) in [#87](https://github.com/jdx/fnox/pull/87)
+
+### 🔍 Other Changes
+
+- shellcheck/shfmt by [@jdx](https://github.com/jdx) in [#77](https://github.com/jdx/fnox/pull/77)
+
+### New Contributors
+
+- @nilleb made their first contribution in [#90](https://github.com/jdx/fnox/pull/90)
+- @lttb made their first contribution in [#84](https://github.com/jdx/fnox/pull/84)
+
+## [1.3.0](https://github.com/jdx/fnox/compare/v1.2.3..v1.3.0) - 2025-11-01
+
+### 🚀 Features
+
+- add support for fnox.$FNOX_PROFILE.toml config files by [@jdx](https://github.com/jdx) in [#64](https://github.com/jdx/fnox/pull/64)
+- add Infisical provider with CLI integration and self-hosted CI by [@jdx](https://github.com/jdx) in [#67](https://github.com/jdx/fnox/pull/67)
+
+### 🐛 Bug Fixes
+
+- **(tests)** skip keychain tests in CI when gnome-keyring-daemon unavailable by [@jdx](https://github.com/jdx) in [#72](https://github.com/jdx/fnox/pull/72)
+- **(tests)** let gnome-keyring-daemon create its own control directory by [@jdx](https://github.com/jdx) in [#73](https://github.com/jdx/fnox/pull/73)
+- add unique namespacing to parallel provider tests by [@jdx](https://github.com/jdx) in [#68](https://github.com/jdx/fnox/pull/68)
+
+### 🚜 Refactor
+
+- remove unused env_diff module and __FNOX_DIFF by [@jdx](https://github.com/jdx) in [#70](https://github.com/jdx/fnox/pull/70)
+
+### ⚡ Performance
+
+- parallelize CI tests across GHA workers using tranches by [@jdx](https://github.com/jdx) in [#65](https://github.com/jdx/fnox/pull/65)
+
+### 🛡️ Security
+
+- **(security)** store only hashes in __FNOX_SESSION instead of plaintext secrets by [@jdx](https://github.com/jdx) in [#71](https://github.com/jdx/fnox/pull/71)
+
+## [1.2.3](https://github.com/jdx/fnox/compare/v1.2.2..v1.2.3) - 2025-11-01
+
+### 🐛 Bug Fixes
+
+- support FNOX_AGE_KEY by [@Cantido](https://github.com/Cantido) in [#60](https://github.com/jdx/fnox/pull/60)
+- use inline tables by default in TOML output and preserve existing format by [@jdx](https://github.com/jdx) in [#62](https://github.com/jdx/fnox/pull/62)
+- enhance edit command to decrypt secrets before editing by [@jdx](https://github.com/jdx) in [#63](https://github.com/jdx/fnox/pull/63)
+
+### 📚 Documentation
+
+- use single-line TOML syntax with section headers by [@jdx](https://github.com/jdx) in [#51](https://github.com/jdx/fnox/pull/51)
+- clean up documentation and organize providers sidebar by [@jdx](https://github.com/jdx) in [cd019c0](https://github.com/jdx/fnox/commit/cd019c00a77370790444d85d4bc80d25f63ceacc)
+
+### 🛡️ Security
+
+- warn about multiline secrets in ci-redact by [@jdx](https://github.com/jdx) in [#53](https://github.com/jdx/fnox/pull/53)
+
+### 🔍 Other Changes
+
+- add semantic PR title validation by [@jdx](https://github.com/jdx) in [#61](https://github.com/jdx/fnox/pull/61)
+
+### New Contributors
+
+- @Cantido made their first contribution in [#60](https://github.com/jdx/fnox/pull/60)
+
+## [1.2.2](https://github.com/jdx/fnox/compare/v1.2.1..v1.2.2) - 2025-10-29
+
+### 🐛 Bug Fixes
+
+- resolve secrets from providers when using --values flag in list command by [@jdx](https://github.com/jdx) in [#47](https://github.com/jdx/fnox/pull/47)
+- hook-env now inherits providers from parent configs by [@jdx](https://github.com/jdx) in [#37](https://github.com/jdx/fnox/pull/37)
+
+### 🚜 Refactor
+
+- change profile flag from -p to -P by [@jdx](https://github.com/jdx) in [#42](https://github.com/jdx/fnox/pull/42)
+
+### 📚 Documentation
+
+- clean up local overrides docs by [@jdx](https://github.com/jdx) in [#46](https://github.com/jdx/fnox/pull/46)
+
+### 🔍 Other Changes
+
+- Update commands reference link to CLI reference by [@thomascjohnson](https://github.com/thomascjohnson) in [#44](https://github.com/jdx/fnox/pull/44)
+- add autofix.ci workflow for automatic linting fixes by [@jdx](https://github.com/jdx) in [#45](https://github.com/jdx/fnox/pull/45)
+
+### New Contributors
+
+- @thomascjohnson made their first contribution in [#44](https://github.com/jdx/fnox/pull/44)
+
 ## [1.2.1](https://github.com/jdx/fnox/compare/v1.2.0..v1.2.1) - 2025-10-28
 
 ### 🛡️ Security

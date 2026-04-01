@@ -1,16 +1,25 @@
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+mod auth_prompt;
 mod commands;
 mod config;
 mod env;
-mod env_diff;
 mod error;
 mod hook_env;
+mod http;
+mod lease;
+mod lease_backends;
+mod mcp_server;
 mod providers;
 mod secret_resolver;
 mod settings;
 mod shell;
+mod source_registry;
+mod spanned;
+mod suggest;
+mod temp_file_secrets;
+mod tui;
 
 #[cfg(test)]
 mod clap_sort;
@@ -31,6 +40,7 @@ async fn main() -> miette::Result<()> {
         age_key_file: cli.age_key_file.clone(),
         profile: cli.profile.clone(),
         if_missing: cli.if_missing.clone(),
+        no_defaults: cli.no_defaults,
     });
 
     // Handle --no-color flag
@@ -46,7 +56,7 @@ async fn main() -> miette::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| format!("fnox={}", log_level).into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     tracing::debug!("Using config file: {}", cli.config.display());

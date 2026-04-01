@@ -23,6 +23,14 @@ eval "$(fnox activate zsh)"
 fnox activate fish | source
 ```
 
+```nu [Nushell]
+# Requires Nushell 0.96+
+# Add to the end of your Nushell configuration
+# (find it by running `$nu.config-path` in Nushell):
+mkdir ($nu.data-dir | path join "vendor/autoload")
+fnox activate nu | save -f ($nu.data-dir | path join "vendor/autoload/fnox.nu")
+```
+
 :::
 
 ## How It Works
@@ -70,7 +78,7 @@ cd my-app
 
 # Switch to staging
 export FNOX_PROFILE=staging
-cd .  # Reload secrets
+# fnox detects the change on the next prompt automatically
 # fnox: -3 +3 DATABASE_URL, API_KEY, JWT_SECRET (from staging profile)
 ```
 
@@ -95,13 +103,9 @@ When you `cd services/api/`, fnox loads:
 
 ## Manual Reload
 
-Force a reload without changing directories:
+fnox's shell hook runs on every prompt and automatically detects changes to config files and environment variables like `FNOX_PROFILE`. In most cases, no manual reload is needed.
 
-```bash
-cd .
-```
-
-Or temporarily disable and re-enable:
+To force a full reload, temporarily disable and re-enable:
 
 ```bash
 # Disable
@@ -110,45 +114,6 @@ fnox deactivate
 # Re-enable
 eval "$(fnox activate bash)"
 ```
-
-## Tips
-
-- **One-time use:** Use `fnox exec` instead of shell integration for scripts
-- **CI/CD:** Don't use shell integration in CI—use `fnox exec` explicitly
-- **Multiple projects:** Shell integration works across all your projects automatically
-- **Performance:** fnox caches config parsing but always fetches fresh secrets (no secret caching)
-
-## Troubleshooting
-
-### Secrets not loading
-
-1. Check that `fnox.toml` exists in current or parent directories
-2. Verify your provider credentials are set (e.g., `FNOX_AGE_KEY`)
-3. Enable debug output: `export FNOX_SHELL_OUTPUT=debug`
-
-### Conflicts with other tools
-
-If you use other tools that modify `cd` (like direnv, mise, etc.), they may conflict. Order matters:
-
-```bash
-# Load fnox AFTER other tools
-eval "$(mise activate bash)"
-eval "$(direnv hook bash)"
-eval "$(fnox activate bash)"  # fnox last
-```
-
-### Slow directory changes
-
-If `cd` is slow, it's likely due to:
-
-- Remote provider calls (AWS/1Password/etc. network latency)
-- Many secrets to resolve
-
-Solutions:
-
-- Use encrypted secrets (age) for development (no network calls)
-- Use profiles to reduce secret count
-- Use `fnox exec` instead of shell integration for large setups
 
 ## Next Steps
 

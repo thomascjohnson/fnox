@@ -44,6 +44,7 @@ pub struct CliSnapshot {
     pub age_key_file: Option<std::path::PathBuf>,
     pub profile: Option<String>,
     pub if_missing: Option<String>,
+    pub no_defaults: bool,
 }
 
 static CLI_SNAPSHOT: LazyLock<Mutex<Option<CliSnapshot>>> = LazyLock::new(|| Mutex::new(None));
@@ -154,6 +155,10 @@ impl Settings {
             if let Some(if_missing) = snapshot.if_missing {
                 map.insert("if_missing", SettingValue::OptionString(Some(if_missing)));
             }
+
+            if snapshot.no_defaults {
+                map.insert("no_defaults", SettingValue::Bool(true));
+            }
         }
 
         map
@@ -203,6 +208,13 @@ impl Settings {
 
         serde_json::from_value(val).unwrap_or_else(|_| defaults.clone())
     }
+
+    #[cfg(test)]
+    pub fn reset_for_tests() {
+        GLOBAL_SETTINGS.store(Arc::new(GeneratedSettings::default()));
+        *INITIALIZED.lock().unwrap() = false;
+        *CLI_SNAPSHOT.lock().unwrap() = None;
+    }
 }
 
 #[cfg(test)]
@@ -214,6 +226,7 @@ mod tests {
         let settings = GeneratedSettings::default();
         assert_eq!(settings.profile, "default");
         assert_eq!(settings.age_key_file, None);
+        assert_eq!(settings.no_defaults, false);
     }
 
     #[test]
@@ -221,9 +234,11 @@ mod tests {
         let defaults = GeneratedSettings {
             age_key_file: None,
             profile: "default".to_string(),
+            no_defaults: false,
             shell_integration_output: "normal".to_string(),
             if_missing: None,
             if_missing_default: None,
+            http_timeout: "30s".to_string(),
         };
 
         let mut env = SourceMap::new();
@@ -252,9 +267,11 @@ mod tests {
         let defaults = GeneratedSettings {
             age_key_file: None,
             profile: "default".to_string(),
+            no_defaults: false,
             shell_integration_output: "normal".to_string(),
             if_missing: None,
             if_missing_default: None,
+            http_timeout: "30s".to_string(),
         };
 
         let mut env = SourceMap::new();

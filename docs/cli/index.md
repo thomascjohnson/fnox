@@ -4,7 +4,7 @@
 
 **Usage**: `fnox [FLAGS] <SUBCOMMAND>`
 
-**Version**: 1.1.0
+**Version**: 1.19.0
 
 - **Usage**: `fnox [FLAGS] <SUBCOMMAND>`
 
@@ -14,6 +14,8 @@
 
 Path to the configuration file (default: fnox.toml, searches parent directories)
 
+**Default:** `fnox.toml`
+
 ### `-P --profile <PROFILE>`
 
 Profile to use (default: default, or FNOX_PROFILE env var)
@@ -21,10 +23,6 @@ Profile to use (default: default, or FNOX_PROFILE env var)
 ### `-v --verbose`
 
 Enable verbose logging
-
-### `--age-key-file <AGE_KEY_FILE>`
-
-Path to age key file for decryption
 
 ### `--if-missing <IF_MISSING>`
 
@@ -34,27 +32,41 @@ What to do if a secret is missing (error, warn, ignore)
 
 Disable colored output
 
+### `--no-defaults`
+
+Do not merge top-level secrets into the selected profile
+
 ## Subcommands
 
 - [`fnox activate [--no-hook-env] [SHELL]`](/cli/activate.md)
-- [`fnox check`](/cli/check.md)
+- [`fnox check [-a --all]`](/cli/check.md)
 - [`fnox completion <SHELL>`](/cli/completion.md)
+- [`fnox config-files`](/cli/config-files.md)
 - [`fnox deactivate`](/cli/deactivate.md)
 - [`fnox doctor`](/cli/doctor.md)
 - [`fnox edit`](/cli/edit.md)
 - [`fnox exec [COMMAND]…`](/cli/exec.md)
-- [`fnox export [-f --format <FORMAT>] [-o --output <OUTPUT>]`](/cli/export.md)
-- [`fnox get <KEY>`](/cli/get.md)
-- [`fnox import [FLAGS] [FORMAT]`](/cli/import.md)
-- [`fnox init [--force] [--skip-wizard]`](/cli/init.md)
+- [`fnox export [FLAGS]`](/cli/export.md)
+- [`fnox get [--base64-decode] <KEY>`](/cli/get.md)
+- [`fnox import <FLAGS> [FORMAT]`](/cli/import.md)
+- [`fnox init [FLAGS]`](/cli/init.md)
+- [`fnox lease <SUBCOMMAND>`](/cli/lease.md)
+- [`fnox lease cleanup`](/cli/lease/cleanup.md)
+- [`fnox lease create [FLAGS] [BACKEND_NAME]`](/cli/lease/create.md)
+- [`fnox lease list [--active] [--expired]`](/cli/lease/list.md)
+- [`fnox lease revoke <LEASE_ID>`](/cli/lease/revoke.md)
 - [`fnox list [FLAGS]`](/cli/list.md)
+- [`fnox mcp`](/cli/mcp.md)
 - [`fnox profiles`](/cli/profiles.md)
 - [`fnox provider <SUBCOMMAND>`](/cli/provider.md)
-- [`fnox provider add <PROVIDER> <PROVIDER_TYPE>`](/cli/provider/add.md)
+- [`fnox provider add [-g --global] [--vault <VAULT>] <PROVIDER> <PROVIDER_TYPE>`](/cli/provider/add.md)
 - [`fnox provider list`](/cli/provider/list.md)
-- [`fnox provider remove <PROVIDER>`](/cli/provider/remove.md)
-- [`fnox provider test <PROVIDER>`](/cli/provider/test.md)
-- [`fnox remove <KEY>`](/cli/remove.md)
+- [`fnox provider remove [-g --global] <PROVIDER>`](/cli/provider/remove.md)
+- [`fnox provider test [-a --all] [PROVIDER]`](/cli/provider/test.md)
+- [`fnox reencrypt [FLAGS] [KEYS]…`](/cli/reencrypt.md)
+- [`fnox remove [-g --global] [-n --dry-run] <KEY>`](/cli/remove.md)
 - [`fnox scan [FLAGS]`](/cli/scan.md)
 - [`fnox set [FLAGS] <KEY> [VALUE]`](/cli/set.md)
+- [`fnox sync [FLAGS] [KEYS]…`](/cli/sync.md)
+- [`fnox tui`](/cli/tui.md)
 - [`fnox version`](/cli/version.md)

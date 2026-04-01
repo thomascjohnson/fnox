@@ -2,16 +2,20 @@
 
 # `fnox init`
 
-- **Usage**: `fnox init [--force] [--skip-wizard]`
+- **Usage**: `fnox init [FLAGS]`
 - **Aliases**: `i`
 
 Initialize a new fnox configuration file
 
 ## Flags
 
-### `--force`
+### `-f --force`
 
 Overwrite existing configuration file
+
+### `-g --global`
+
+Initialize the global config file (~/.config/fnox/config.toml)
 
 ### `--skip-wizard`
 

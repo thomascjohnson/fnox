@@ -1,11 +1,12 @@
 use crate::config::Config;
-use crate::env_diff::{EnvDiff, EnvDiffOperation};
 use crate::hook_env::{self, HookEnvSession, PREV_SESSION};
 use crate::settings::Settings;
 use crate::shell;
+use crate::temp_file_secrets::create_persistent_secret_file;
 use anyhow::Result;
 use clap::Parser;
 use std::collections::HashMap;
+use std::fs;
 
 /// Output mode for shell integration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +37,7 @@ impl OutputMode {
 #[derive(Debug, Parser)]
 #[command(about = "Internal command used by shell hooks to load secrets")]
 pub struct HookEnvCommand {
-    /// Shell type (bash, zsh, fish)
+    /// Shell type (bash, zsh, fish, nu)
     #[arg(short = 's', long)]
     pub shell: Option<String>,
 }
@@ -79,128 +80,236 @@ impl HookEnvCommand {
         // Find fnox.toml in current or parent directories
         let config_path = hook_env::find_config();
 
-        let mut output = String::new();
-
         // Load secrets if config exists
-        let loaded_secrets = if let Some(ref path) = config_path {
-            match load_secrets_from_config(path).await {
-                Ok(secrets) => secrets,
+        let loaded_data = if config_path.is_some() {
+            match load_secrets_from_config().await {
+                Ok(data) => data,
                 Err(e) => {
                     // Log error but don't fail the shell hook
                     tracing::warn!("failed to load secrets: {}", e);
-                    HashMap::new()
+                    LoadedSecrets {
+                        secrets: HashMap::new(),
+                        temp_files: HashMap::new(),
+                    }
                 }
             }
         } else {
-            HashMap::new()
+            LoadedSecrets {
+                secrets: HashMap::new(),
+                temp_files: HashMap::new(),
+            }
         };
 
-        // Calculate diff from previous session
-        let old_secrets = PREV_SESSION.loaded_secrets.clone();
-        let env_diff = EnvDiff::new(old_secrets, loaded_secrets.clone());
+        // Clean up old temp files that are no longer needed
+        cleanup_old_temp_files(&PREV_SESSION.temp_files, &loaded_data.temp_files);
+
+        // Calculate changes from previous session using hashes
+        let (added, removed) = calculate_changes(&PREV_SESSION.secret_hashes, &loaded_data.secrets);
 
         // Display summary of changes if enabled
-        if output_mode.should_show_summary() && env_diff.has_changes() {
-            display_changes(&env_diff, output_mode);
-        }
-
-        // Generate shell code for environment changes
-        if env_diff.has_changes() {
-            for operation in env_diff.operations() {
-                match operation {
-                    EnvDiffOperation::Set(key, value) => {
-                        output.push_str(&shell.set_env(&key, &value));
-                    }
-                    EnvDiffOperation::Remove(key) => {
-                        output.push_str(&shell.unset_env(&key));
-                    }
-                }
-            }
+        if output_mode.should_show_summary() && (!added.is_empty() || !removed.is_empty()) {
+            display_changes(&added, &removed, output_mode);
         }
 
         // Create new session
         let current_dir = std::env::current_dir().ok();
-        let session = HookEnvSession::new(current_dir, config_path, loaded_secrets)?;
+        let session = HookEnvSession::new(
+            current_dir,
+            config_path,
+            loaded_data.secrets,
+            loaded_data.temp_files,
+        )?;
 
         // Export session state for next invocation
         let session_encoded = session.encode()?;
-        output.push_str(&shell.set_env("__FNOX_SESSION", &session_encoded));
 
-        // Export diff state for potential rollback
-        let diff_encoded = env_diff.encode()?;
-        output.push_str(&shell.set_env("__FNOX_DIFF", &diff_encoded));
-
+        // Generate output via the shell's hook_env_output method.
+        // Eval-based shells (bash, zsh, fish) produce shell code;
+        // structured shells (nushell) produce JSON.
+        let output = shell.hook_env_output(&added, &removed, &session_encoded);
         print!("{}", output);
 
         Ok(())
     }
 }
 
+/// Calculate which secrets were added/changed or removed by comparing hashes
+fn calculate_changes(
+    old_hashes: &indexmap::IndexMap<String, String>,
+    new_secrets: &HashMap<String, String>,
+) -> (Vec<(String, String)>, Vec<String>) {
+    use crate::hook_env::{PREV_SESSION, hash_secret_value_with_session};
+
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+
+    // Find additions and changes by comparing hashes
+    for (key, new_value) in new_secrets {
+        // Use the previous session's hash_key for comparison
+        let new_hash = hash_secret_value_with_session(&PREV_SESSION, key, new_value);
+        match old_hashes.get(key) {
+            Some(old_hash) if old_hash == &new_hash => {
+                // Hash matches, no change
+            }
+            _ => {
+                // New or changed value (hash differs or key is new)
+                added.push((key.clone(), new_value.clone()));
+            }
+        }
+    }
+
+    // Find removals - keys that were in old session but not in new
+    for key in old_hashes.keys() {
+        if !new_secrets.contains_key(key) {
+            removed.push(key.clone());
+        }
+    }
+
+    (added, removed)
+}
+
+/// Result of loading secrets with file-based information
+struct LoadedSecrets {
+    /// Secret values (or file paths for file-based secrets)
+    secrets: HashMap<String, String>,
+    /// Temp file paths for file-based secrets
+    temp_files: HashMap<String, String>,
+}
+
 /// Load all secrets from a fnox.toml config file
-async fn load_secrets_from_config(
-    config_path: &std::path::Path,
-) -> Result<HashMap<String, String>> {
+async fn load_secrets_from_config() -> Result<LoadedSecrets> {
     use crate::secret_resolver::resolve_secrets_batch;
 
-    let config =
-        Config::load(config_path).map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    // Use load_smart to ensure provider inheritance from parent configs
+    // This handles fnox.toml and fnox.local.toml with proper recursion
     let settings =
         Settings::try_get().map_err(|e| anyhow::anyhow!("Failed to get settings: {}", e))?;
+    let filenames = crate::config::all_config_filenames(Some(&settings.profile));
+    let mut last_error = None;
+    let mut config = None;
+    for filename in &filenames {
+        match Config::load_smart(filename) {
+            Ok(c) => {
+                config = Some(c);
+                break;
+            }
+            Err(e) => {
+                // Only store parse errors (not "file not found" errors)
+                // to show detailed error messages for actual config issues
+                let is_not_found = matches!(&e, crate::error::FnoxError::ConfigNotFound { .. });
+                if !is_not_found {
+                    last_error = Some(e);
+                }
+            }
+        }
+    }
+    let config = match (config, last_error) {
+        (Some(c), _) => c,
+        (None, Some(e)) => return Err(anyhow::anyhow!("{}", e)),
+        (None, None) => {
+            return Err(anyhow::anyhow!(
+                "No configuration file found (tried: {})",
+                filenames.join(", ")
+            ));
+        }
+    };
 
-    // Get the active profile
+    // Get the active profile (settings was already loaded above)
     let profile_name = &settings.profile;
 
     // Get secrets for the profile using the Config method (inherits top-level secrets)
-    let secrets = config
+    let profile_secrets = config
         .get_secrets(profile_name)
         .map_err(|e| anyhow::anyhow!("Failed to get secrets: {}", e))?;
 
-    let age_key_file = settings.age_key_file.as_deref();
-
     // Use batch resolution for better performance
-    let resolved = match resolve_secrets_batch(&config, profile_name, &secrets, age_key_file).await
-    {
+    let resolved = match resolve_secrets_batch(&config, profile_name, &profile_secrets).await {
         Ok(r) => r,
         Err(e) => {
             // Log error but don't fail the shell hook
             tracing::warn!("failed to resolve secrets: {}", e);
-            return Ok(HashMap::new());
+            return Ok(LoadedSecrets {
+                secrets: HashMap::new(),
+                temp_files: HashMap::new(),
+            });
         }
     };
 
-    // Convert to HashMap, filtering out None values
+    // Process secrets: create temp files for file-based secrets
     let mut loaded_secrets = HashMap::new();
-    for (key, value) in resolved {
-        if let Some(value) = value {
-            loaded_secrets.insert(key, value);
+    let mut temp_files = HashMap::new();
+
+    for (key, value_opt) in resolved {
+        // Skip secrets with env = false regardless of resolution result —
+        // they must never appear in shell integration output.
+        if let Some(secret_config) = profile_secrets.get(&key)
+            && !secret_config.env
+        {
+            continue;
+        }
+        if let Some(value) = value_opt {
+            // Check if this secret should be file-based
+            if let Some(secret_config) = profile_secrets.get(&key) {
+                if secret_config.as_file {
+                    // Create a persistent temp file for this secret
+                    match create_persistent_secret_file("fnox-hook-", &key, &value) {
+                        Ok(file_path) => {
+                            // Store the file path as the "value" to set in env
+                            loaded_secrets.insert(key.clone(), file_path.clone());
+                            temp_files.insert(key, file_path);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "failed to create temp file for secret '{}': {}",
+                                key,
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    // Regular secret - store value directly
+                    loaded_secrets.insert(key, value);
+                }
+            } else {
+                loaded_secrets.insert(key, value);
+            }
         }
     }
 
-    Ok(loaded_secrets)
+    Ok(LoadedSecrets {
+        secrets: loaded_secrets,
+        temp_files,
+    })
+}
+
+/// Clean up old temp files that are no longer needed
+fn cleanup_old_temp_files(
+    old_files: &HashMap<String, String>,
+    new_files: &HashMap<String, String>,
+) {
+    for (key, old_path) in old_files {
+        // Only delete if this secret is no longer file-based or has a different path
+        if !new_files.contains_key(key) || new_files.get(key) != Some(old_path) {
+            if let Err(e) = fs::remove_file(old_path) {
+                // Log but don't fail - file might already be deleted
+                tracing::debug!("failed to clean up temp file for '{}': {}", key, e);
+            } else {
+                tracing::debug!("cleaned up temp file for secret '{}'", key);
+            }
+        }
+    }
 }
 
 /// Display a summary of environment changes
-fn display_changes(env_diff: &EnvDiff, mode: OutputMode) {
+fn display_changes(added: &[(String, String)], removed: &[String], mode: OutputMode) {
     use console::{Style, Term};
 
     let term = Term::stderr();
     let cyan = Style::new().cyan().for_stderr();
     let dim = Style::new().dim().for_stderr();
 
-    let operations = env_diff.operations();
-    let mut added_keys = Vec::new();
-    let mut removed_keys = Vec::new();
-
-    for op in operations {
-        match op {
-            EnvDiffOperation::Set(key, _value) => {
-                added_keys.push(key.clone());
-            }
-            EnvDiffOperation::Remove(key) => {
-                removed_keys.push(key.clone());
-            }
-        }
-    }
+    let added_keys: Vec<String> = added.iter().map(|(k, _)| k.clone()).collect();
+    let removed_keys: Vec<String> = removed.to_vec();
 
     if mode.should_show_debug() {
         // Debug mode: show each secret on its own line

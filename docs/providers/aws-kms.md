@@ -106,9 +106,8 @@ fnox set DATABASE_URL "postgresql://prod.example.com/db" --provider kms
 Result in `fnox.toml`:
 
 ```toml
-[secrets.DATABASE_URL]
-provider = "kms"
-value = "AQICAHhw...base64...ciphertext..."  # ← Encrypted, safe to commit!
+[secrets]
+DATABASE_URL = { provider = "kms", value = "AQICAHhw...base64...ciphertext..." }  # ← Encrypted, safe to commit!
 ```
 
 ### Decrypt and Get
@@ -131,23 +130,18 @@ fnox get DATABASE_URL
 
 ```toml
 # Development: age encryption (free)
-[providers.age]
-type = "age"
-recipients = ["age1..."]
+[providers]
+age = { type = "age", recipients = ["age1..."] }
 
-[secrets.DATABASE_URL]
-provider = "age"
-value = "encrypted-dev..."
+[secrets]
+DATABASE_URL = { provider = "age", value = "encrypted-dev..." }
 
 # Production: AWS KMS
-[profiles.production.providers.kms]
-type = "aws-kms"
-key_id = "arn:aws:kms:us-east-1:123456789012:key/..."
-region = "us-east-1"
+[profiles.production.providers]
+kms = { type = "aws-kms", key_id = "arn:aws:kms:us-east-1:123456789012:key/...", region = "us-east-1" }
 
-[profiles.production.secrets.DATABASE_URL]
-provider = "kms"
-value = "AQICAHhw..."  # ← KMS encrypted ciphertext
+[profiles.production.secrets]
+DATABASE_URL = { provider = "kms", value = "AQICAHhw..." }  # ← KMS encrypted ciphertext
 ```
 
 ## Key Rotation

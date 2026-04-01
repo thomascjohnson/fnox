@@ -8,28 +8,19 @@ Define environment-specific secrets using profiles:
 
 ```toml
 # Default profile (development)
-[secrets.API_URL]
-default = "http://localhost:3000"
-
-[secrets.DATABASE_URL]
-provider = "age"
-value = "encrypted-dev-db..."
+[secrets]
+API_URL = { default = "http://localhost:3000" }
+DATABASE_URL = { provider = "age", value = "encrypted-dev-db..." }
 
 # Staging profile
-[profiles.staging.secrets.API_URL]
-default = "https://staging.example.com"
-
-[profiles.staging.secrets.DATABASE_URL]
-provider = "age"
-value = "encrypted-staging-db..."
+[profiles.staging.secrets]
+API_URL = { default = "https://staging.example.com" }
+DATABASE_URL = { provider = "age", value = "encrypted-staging-db..." }
 
 # Production profile
-[profiles.production.secrets.API_URL]
-default = "https://api.example.com"
-
-[profiles.production.secrets.DATABASE_URL]
-provider = "aws"
-value = "prod-database-url"  # Stored in AWS Secrets Manager
+[profiles.production.secrets]
+API_URL = { default = "https://api.example.com" }
+DATABASE_URL = { provider = "aws", value = "prod-database-url" }  # Stored in AWS Secrets Manager
 ```
 
 ## Using Profiles
@@ -67,7 +58,7 @@ export FNOX_PROFILE=production
 cd my-app  # Loads production secrets
 
 export FNOX_PROFILE=staging
-cd .       # Reloads with staging secrets
+# fnox detects the change on the next prompt automatically
 ```
 
 ## Profile Inheritance
@@ -76,27 +67,19 @@ Profiles automatically inherit secrets from the top level:
 
 ```toml
 # Define once - all profiles inherit
-[secrets.LOG_LEVEL]
-default = "info"
-
-[secrets.API_TIMEOUT]
-default = "30"
-
-[secrets.DATABASE_URL]
-provider = "age"
-value = "encrypted-dev-db..."
+[secrets]
+LOG_LEVEL = { default = "info" }
+API_TIMEOUT = { default = "30" }
+DATABASE_URL = { provider = "age", value = "encrypted-dev-db..." }
 
 # Staging inherits all top-level secrets
 [profiles.staging]
 # Automatically gets: LOG_LEVEL, API_TIMEOUT, DATABASE_URL
 
 # Production overrides specific secrets, inherits the rest
-[profiles.production.secrets.DATABASE_URL]
-provider = "aws"
-value = "prod-db"  # Overrides DATABASE_URL
-
-[profiles.production.secrets.LOG_LEVEL]
-default = "warn"   # Overrides LOG_LEVEL
+[profiles.production.secrets]
+DATABASE_URL = { provider = "aws", value = "prod-db" }  # Overrides DATABASE_URL
+LOG_LEVEL = { default = "warn" }  # Overrides LOG_LEVEL
 # Still inherits API_TIMEOUT="30" from top level
 ```
 
@@ -108,22 +91,39 @@ Each profile can have its own providers:
 
 ```toml
 # Default providers (for development)
-[providers.age]
-type = "age"
-recipients = ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"]
+[providers]
+age = { type = "age", recipients = ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"] }
 
 # Production profile with AWS providers
 [profiles.production]
 
-[profiles.production.providers.aws]
-type = "aws-sm"
-region = "us-east-1"
-prefix = "myapp/"
+[profiles.production.providers]
+aws = { type = "aws-sm", region = "us-east-1", prefix = "myapp/" }
 
-[profiles.production.secrets.DATABASE_URL]
-provider = "aws"
-value = "database-url"
+[profiles.production.secrets]
+DATABASE_URL = { provider = "aws", value = "database-url" }
 ```
+
+## Secret References in Provider Config
+
+Provider configuration properties can reference secrets using `{ secret = "NAME" }`. This enables bootstrap scenarios where provider credentials are themselves managed as secrets:
+
+```toml
+[providers.age]
+type = "age"
+recipients = ["age1..."]
+
+[providers.vault]
+type = "vault"
+address = "http://vault.example.com:8200"
+token = { secret = "VAULT_TOKEN" }  # Resolved from secrets or env var
+
+[secrets]
+VAULT_TOKEN = { provider = "age", value = "AGE-ENCRYPTED-TOKEN..." }
+DATABASE_URL = { provider = "vault", value = "database/creds/myapp" }
+```
+
+Resolution order: config secrets first, then environment variables. fnox detects circular dependencies and errors if found.
 
 ## List Profiles
 
@@ -147,46 +147,42 @@ production
 
 ```toml
 # Development (default): encrypted in git
-[providers.age]
-type = "age"
-recipients = ["age1..."]
+[providers]
+age = { type = "age", recipients = ["age1..."] }
 
-[secrets.DATABASE_URL]
-provider = "age"
-value = "encrypted..."
+[secrets]
+DATABASE_URL = { provider = "age", value = "encrypted..." }
 
 # Production: AWS Secrets Manager
-[profiles.production.providers.aws]
-type = "aws-sm"
-region = "us-east-1"
+[profiles.production.providers]
+aws = { type = "aws-sm", region = "us-east-1" }
 
-[profiles.production.secrets.DATABASE_URL]
-provider = "aws"
-value = "database-url"
+[profiles.production.secrets]
+DATABASE_URL = { provider = "aws", value = "database-url" }
 ```
 
 ### Multi-Region Production
 
 ```toml
-[profiles.production-us.providers.aws]
-type = "aws-sm"
-region = "us-east-1"
+[profiles.production-us.providers]
+aws = { type = "aws-sm", region = "us-east-1" }
 
-[profiles.production-eu.providers.aws]
-type = "aws-sm"
-region = "eu-west-1"
+[profiles.production-eu.providers]
+aws = { type = "aws-sm", region = "eu-west-1" }
 ```
 
 ### Per-Developer Profiles
 
 ```toml
 [profiles.alice]
-[profiles.alice.secrets.DATABASE_URL]
-default = "postgresql://localhost/alice_db"
+
+[profiles.alice.secrets]
+DATABASE_URL = { default = "postgresql://localhost/alice_db" }
 
 [profiles.bob]
-[profiles.bob.secrets.DATABASE_URL]
-default = "postgresql://localhost/bob_db"
+
+[profiles.bob.secrets]
+DATABASE_URL = { default = "postgresql://localhost/bob_db" }
 ```
 
 ```bash
@@ -213,6 +209,5 @@ jobs:
 
 ## Next Steps
 
-- [Hierarchical Config](/guide/hierarchical-config) - Organize configs across directories
-- [Local Overrides](/guide/local-overrides) - Per-developer customization
+- [Hierarchical Config](/guide/hierarchical-config) - Organize configs across directories (includes local overrides)
 - [Real-World Example](/guide/real-world-example) - Complete multi-environment setup

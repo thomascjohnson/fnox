@@ -1,8 +1,10 @@
 use crate::commands::Cli;
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{FnoxError, Result};
 use crate::secret_resolver::resolve_secrets_batch;
+use crate::temp_file_secrets::create_persistent_secret_file;
 use clap::{Args, ValueEnum};
+use console;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -30,6 +32,10 @@ pub struct ExportCommand {
     #[arg(short, long, default_value = "env", value_enum)]
     format: ExportFormat,
 
+    /// Show what would be exported without writing to file
+    #[arg(short = 'n', long)]
+    dry_run: bool,
+
     /// Output file (default: stdout)
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
@@ -56,19 +62,38 @@ impl ExportCommand {
         let profile_secrets = config.get_secrets(&profile)?;
 
         // Resolve secrets using batch resolution for better performance
-        let resolved_secrets = resolve_secrets_batch(
-            &config,
-            &profile,
-            &profile_secrets,
-            cli.age_key_file.as_deref(),
-        )
-        .await?;
+        let resolved_secrets = resolve_secrets_batch(&config, &profile, &profile_secrets).await?;
 
         // Build secrets map, preserving insertion order
+        // For file-based secrets, create persistent temp files
         let mut secrets = IndexMap::new();
-        for (key, value) in resolved_secrets {
-            if let Some(value) = value {
-                secrets.insert(key, value);
+        for (key, value_opt) in resolved_secrets {
+            if let Some(value) = value_opt {
+                // Check if this secret should be file-based
+                if let Some(secret_config) = profile_secrets.get(&key) {
+                    if secret_config.as_file {
+                        // Create a persistent temp file for this secret
+                        match create_persistent_secret_file("fnox-export-", &key, &value) {
+                            Ok(file_path) => {
+                                secrets.insert(key, file_path);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to create temp file for secret '{}': {}",
+                                    key,
+                                    e
+                                );
+                                // Fall back to storing the value
+                                secrets.insert(key, value);
+                            }
+                        }
+                    } else {
+                        // Regular secret - store value directly
+                        secrets.insert(key, value);
+                    }
+                } else {
+                    secrets.insert(key, value);
+                }
             }
         }
 
@@ -89,12 +114,30 @@ impl ExportCommand {
 
         match &self.output {
             Some(path) => {
-                std::fs::write(path, output).map_err(|e| {
-                    miette::miette!("Failed to write to file {}: {}", path.display(), e)
-                })?;
-                println!("Secrets exported to: {}", path.display());
+                if self.dry_run {
+                    let dry_run_label = console::style("[dry-run]").yellow().bold();
+                    let styled_path = console::style(path.display()).cyan();
+                    println!(
+                        "{dry_run_label} Would export {} secrets to {styled_path} in {} format:",
+                        export_data.secrets.len(),
+                        format!("{:?}", self.format).to_lowercase()
+                    );
+                    for key in export_data.secrets.keys() {
+                        println!("  {}", console::style(key).dim());
+                    }
+                } else {
+                    let path = path.to_path_buf();
+                    std::fs::write(&path, &output)
+                        .map_err(|e| FnoxError::ExportWriteFailed { path, source: e })?;
+                    println!(
+                        "Secrets exported to: {}",
+                        self.output.as_ref().unwrap().display()
+                    );
+                }
             }
             None => {
+                // When outputting to stdout, dry-run just outputs normally
+                // (there's nothing to "protect" since we're not writing a file)
                 print!("{}", output);
             }
         }
@@ -120,17 +163,14 @@ impl ExportCommand {
     }
 
     fn export_as_json(&self, data: &ExportData) -> Result<String> {
-        Ok(serde_json::to_string_pretty(data)
-            .map_err(|e| miette::miette!("JSON serialization error: {}", e))?)
+        Ok(serde_json::to_string_pretty(data)?)
     }
 
     fn export_as_yaml(&self, data: &ExportData) -> Result<String> {
-        Ok(serde_yaml::to_string(data)
-            .map_err(|e| miette::miette!("YAML serialization error: {}", e))?)
+        Ok(serde_yaml::to_string(data)?)
     }
 
     fn export_as_toml(&self, data: &ExportData) -> Result<String> {
-        Ok(toml_edit::ser::to_string_pretty(data)
-            .map_err(|e| miette::miette!("TOML serialization error: {}", e))?)
+        toml_edit::ser::to_string_pretty(data).map_err(|source| FnoxError::Toml { source })
     }
 }

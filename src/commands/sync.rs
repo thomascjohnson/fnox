@@ -1,0 +1,315 @@
+use crate::commands::Cli;
+use crate::config::{self, Config, SyncConfig, local_override_filename};
+use crate::error::{FnoxError, Result};
+use crate::secret_resolver::resolve_secrets_batch;
+use clap::Args;
+use console;
+use indexmap::IndexMap;
+use regex::Regex;
+use std::io;
+use std::path::PathBuf;
+
+/// Sync secrets from remote providers to a local encryption provider
+#[derive(Args)]
+pub struct SyncCommand {
+    /// Only sync these specific secret keys
+    keys: Vec<String>,
+
+    /// Skip confirmation prompt
+    #[arg(short, long)]
+    force: bool,
+
+    /// Write to global config (~/.config/fnox/config.toml)
+    #[arg(short = 'g', long)]
+    global: bool,
+
+    /// Show what would be done without making changes
+    #[arg(short = 'n', long)]
+    dry_run: bool,
+
+    /// Target encryption provider (defaults to default_provider)
+    #[arg(short = 'p', long)]
+    provider: Option<String>,
+
+    /// Only sync secrets from this source provider
+    #[arg(short = 's', long)]
+    source: Option<String>,
+
+    /// Only sync matching secrets (regex pattern)
+    #[arg(long)]
+    filter: Option<String>,
+
+    /// Write sync overrides to the local override file next to the config file
+    #[arg(long, conflicts_with = "global")]
+    local_file: bool,
+}
+
+impl SyncCommand {
+    pub async fn run(&self, cli: &Cli, merged_config: Config) -> Result<()> {
+        let profile = Config::get_profile(cli.profile.as_deref());
+        tracing::debug!("Syncing secrets for profile '{}'", profile);
+
+        let effective_config_path =
+            if cli.config == std::path::Path::new(config::DEFAULT_CONFIG_FILENAME) {
+                let current_dir = std::env::current_dir().map_err(|e| {
+                    FnoxError::Config(format!("Failed to get current directory: {}", e))
+                })?;
+                let candidate = config::find_local_config(&current_dir, Some(&profile));
+                if local_override_filename(&candidate).is_some() {
+                    candidate
+                } else {
+                    cli.config.clone()
+                }
+            } else {
+                cli.config.clone()
+            };
+
+        let local_override_filename = self
+            .local_file
+            .then(|| {
+                local_override_filename(&effective_config_path).ok_or_else(|| {
+                    FnoxError::Config(format!(
+                        "--local-file requires --config to be 'fnox.toml' or '.fnox.toml'; '{}' would not load the adjacent local override file",
+                        effective_config_path.display()
+                    ))
+                })
+            })
+            .transpose()?;
+
+        // Determine target provider
+        let target_provider_name = if let Some(ref p) = self.provider {
+            p.clone()
+        } else if let Some(dp) = merged_config.get_default_provider(&profile)? {
+            dp
+        } else {
+            return Err(FnoxError::Config(
+                "No target provider specified and no default_provider configured. Use -p <provider> to specify one.".to_string(),
+            ));
+        };
+
+        // Verify target provider exists and has Encryption capability
+        let providers = merged_config.get_providers(&profile);
+        let provider_config = providers.get(&target_provider_name).ok_or_else(|| {
+            FnoxError::ProviderNotConfigured {
+                provider: target_provider_name.clone(),
+                profile: profile.to_string(),
+                config_path: None,
+                suggestion: None,
+            }
+        })?;
+
+        let target_provider = crate::providers::get_provider_resolved(
+            &merged_config,
+            &profile,
+            &target_provider_name,
+            provider_config,
+        )
+        .await?;
+        let capabilities = target_provider.capabilities();
+        if !capabilities.contains(&crate::providers::ProviderCapability::Encryption) {
+            return Err(FnoxError::SyncTargetProviderUnsupported {
+                provider: target_provider_name.clone(),
+            });
+        }
+
+        // Get all secrets from config
+        let all_secrets = merged_config.get_secrets(&profile)?;
+
+        // Filter secrets to sync
+        let filter_regex = if let Some(ref filter) = self.filter {
+            Some(
+                Regex::new(filter).map_err(|e| FnoxError::InvalidRegexFilter {
+                    pattern: filter.clone(),
+                    details: e.to_string(),
+                })?,
+            )
+        } else {
+            None
+        };
+
+        let keys_filter: std::collections::HashSet<_> = self.keys.iter().collect();
+        let mut secrets_to_sync = IndexMap::new();
+        for (key, secret_config) in &all_secrets {
+            // Must have a provider configured (skip env-var-only and default-only secrets)
+            let Some(source_provider) = secret_config.provider() else {
+                continue;
+            };
+
+            // Must not already use the target provider
+            if source_provider == target_provider_name {
+                continue;
+            }
+
+            // Apply --source filter
+            if let Some(ref source) = self.source
+                && source_provider != source
+            {
+                continue;
+            }
+
+            // Apply positional KEYS filter
+            if !keys_filter.is_empty() && !keys_filter.contains(key) {
+                continue;
+            }
+
+            // Apply --filter regex
+            if let Some(ref regex) = filter_regex
+                && !regex.is_match(key)
+            {
+                continue;
+            }
+
+            secrets_to_sync.insert(key.clone(), secret_config.clone());
+        }
+
+        if secrets_to_sync.is_empty() {
+            println!("No secrets to sync");
+            return Ok(());
+        }
+
+        let destination_suffix = if self.local_file {
+            " (local-file)"
+        } else if self.global {
+            " (global)"
+        } else {
+            ""
+        };
+
+        // Dry-run mode: show what would be done and exit
+        if self.dry_run {
+            let dry_run_label = console::style("[dry-run]").yellow().bold();
+            let styled_profile = console::style(&profile).magenta();
+            let styled_provider = console::style(&target_provider_name).green();
+
+            println!(
+                "{dry_run_label} Would sync {} secrets in profile {styled_profile} to provider {styled_provider}{destination_suffix}:",
+                secrets_to_sync.len()
+            );
+            for (key, secret_config) in &secrets_to_sync {
+                let source = secret_config.provider().unwrap_or("unknown");
+                println!(
+                    "  {} (from {})",
+                    console::style(key).cyan(),
+                    console::style(source).dim()
+                );
+            }
+            return Ok(());
+        }
+
+        // Confirm unless forced
+        if !self.force {
+            println!(
+                "\nReady to sync {} secrets to provider '{}':",
+                secrets_to_sync.len(),
+                target_provider_name
+            );
+            for (key, secret_config) in secrets_to_sync.iter().take(10) {
+                let source = secret_config.provider().unwrap_or("unknown");
+                println!("  {} (from {})", key, source);
+            }
+            if secrets_to_sync.len() > 10 {
+                println!("  ... and {} more", secrets_to_sync.len() - 10);
+            }
+
+            println!("\nContinue? [y/N]");
+            let mut response = String::new();
+            io::stdin()
+                .read_line(&mut response)
+                .map_err(|e| FnoxError::StdinReadFailed { source: e })?;
+
+            if !response.trim().to_lowercase().starts_with('y') {
+                println!("Sync cancelled");
+                return Ok(());
+            }
+        }
+
+        // Resolve plaintext values from source providers (strip sync cache so we
+        // re-fetch from the original provider rather than the cached sync value)
+        let mut secrets_for_resolve = secrets_to_sync.clone();
+        for secret_config in secrets_for_resolve.values_mut() {
+            secret_config.sync = None;
+        }
+        let resolved =
+            resolve_secrets_batch(&merged_config, &profile, &secrets_for_resolve).await?;
+
+        // Encrypt each value and build updated secret configs
+        let mut synced_secrets = IndexMap::new();
+        let mut synced_count = 0;
+        let mut skipped_count = 0;
+
+        // Determine target config file path
+        let (target_path, ensure_parent_dir) = if self.local_file {
+            let config_dir = effective_config_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            (
+                config_dir
+                    .join(local_override_filename.expect("validated local override filename")),
+                true,
+            )
+        } else if self.global {
+            (Config::global_config_path(), true)
+        } else {
+            (cli.config.clone(), false)
+        };
+
+        if ensure_parent_dir
+            && let Some(parent) = target_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| FnoxError::CreateDirFailed {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+
+        for (key, plaintext) in &resolved {
+            let Some(plaintext) = plaintext else {
+                tracing::warn!("Skipping '{}': could not resolve value", key);
+                skipped_count += 1;
+                continue;
+            };
+
+            let mut secret_config = secrets_to_sync[key].clone();
+
+            // Encrypt with target provider
+            match target_provider.encrypt(plaintext).await {
+                Ok(encrypted) => {
+                    secret_config.sync = Some(SyncConfig {
+                        provider: target_provider_name.clone(),
+                        value: encrypted,
+                    });
+                    synced_secrets.insert(key.clone(), secret_config);
+                    synced_count += 1;
+                }
+                Err(e) => {
+                    return Err(FnoxError::SyncEncryptionFailed {
+                        key: key.clone(),
+                        provider: target_provider_name.clone(),
+                        details: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        if synced_secrets.is_empty() {
+            println!("No secrets were synced (all skipped)");
+            return Ok(());
+        }
+
+        // Save to config
+        Config::save_secrets_to_source(&synced_secrets, &profile, &target_path)?;
+
+        println!(
+            "Synced {} secrets to provider '{}'{}",
+            synced_count, target_provider_name, destination_suffix
+        );
+        if skipped_count > 0 {
+            println!("Skipped {} secrets (could not resolve)", skipped_count);
+        }
+
+        Ok(())
+    }
+}

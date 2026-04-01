@@ -1,9 +1,13 @@
 use crate::commands::Cli;
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{FnoxError, Result};
 use clap::{Args, ValueEnum};
+use console;
+use indexmap::IndexMap;
+use miette::{NamedSource, SourceSpan};
 use regex::Regex;
 use std::io::{self, Read};
+use std::sync::Arc;
 use std::{collections::HashMap, path::PathBuf};
 use strum::{Display, EnumString, VariantNames};
 
@@ -33,9 +37,17 @@ pub struct ImportCommand {
     #[arg(short, long)]
     force: bool,
 
+    /// Import to the global config file (~/.config/fnox/config.toml)
+    #[arg(short = 'g', long)]
+    global: bool,
+
     /// Source file or path to import from (default: stdin)
     #[arg(short = 'i', long)]
     input: Option<PathBuf>,
+
+    /// Show what would be imported without making changes
+    #[arg(short = 'n', long)]
+    dry_run: bool,
 
     /// Provider to use for encrypting/storing imported secrets (required)
     #[arg(short = 'p', long)]
@@ -51,7 +63,7 @@ pub struct ImportCommand {
 }
 
 impl ImportCommand {
-    pub async fn run(&self, cli: &Cli, mut config: Config) -> Result<()> {
+    pub async fn run(&self, cli: &Cli, merged_config: Config) -> Result<()> {
         let profile = Config::get_profile(cli.profile.as_deref());
         tracing::debug!(
             "Importing secrets in {} format into profile '{}'",
@@ -62,23 +74,19 @@ impl ImportCommand {
         let input = self.read_input()?;
         let mut secrets = self.parse_input(&input)?;
 
-        // When importing from stdin, --force is required because stdin is consumed
+        // When importing from stdin, --force or --dry-run is required because stdin is consumed
         // by read_input() and won't be available for the confirmation prompt
-        if self.input.is_none() && !self.force {
-            return Err(miette::miette!(
-                "When importing from stdin, the --force flag is required\n\n\
-                This is because stdin is consumed during import and cannot be used \
-                for the confirmation prompt.\n\n\
-                Use: fnox import --force < input.env\n\
-                Or:  cat input.env | fnox import --force"
-            )
-            .into());
+        // (dry-run doesn't need confirmation since it doesn't modify anything)
+        if self.input.is_none() && !self.force && !self.dry_run {
+            return Err(FnoxError::ImportStdinRequiresForce);
         }
 
         // Apply filter if specified
         if let Some(ref filter) = self.filter {
-            let regex = Regex::new(filter)
-                .map_err(|e| miette::miette!("Invalid regex filter '{}': {}", filter, e))?;
+            let regex = Regex::new(filter).map_err(|e| FnoxError::InvalidRegexFilter {
+                pattern: filter.clone(),
+                details: e.to_string(),
+            })?;
             secrets.retain(|key, _| regex.is_match(key));
         }
 
@@ -94,6 +102,65 @@ impl ImportCommand {
 
         if secrets.is_empty() {
             println!("No secrets to import");
+            return Ok(());
+        }
+
+        // Verify provider exists (use merged config to find providers from any source)
+        let providers = merged_config.get_providers(&profile);
+        let provider_config =
+            providers
+                .get(&self.provider)
+                .ok_or_else(|| FnoxError::ProviderNotConfigured {
+                    provider: self.provider.clone(),
+                    profile: profile.to_string(),
+                    config_path: None,
+                    suggestion: None,
+                })?;
+
+        // Get provider and validate capabilities (needed for both dry-run and actual import)
+        let provider = crate::providers::get_provider_resolved(
+            &merged_config,
+            &profile,
+            &self.provider,
+            provider_config,
+        )
+        .await?;
+        let capabilities = provider.capabilities();
+        let is_encryption_provider =
+            capabilities.contains(&crate::providers::ProviderCapability::Encryption);
+        let is_remote_storage_provider =
+            capabilities.contains(&crate::providers::ProviderCapability::RemoteStorage);
+
+        // Validate that provider supports import (encryption capability required)
+        if !is_encryption_provider {
+            if is_remote_storage_provider {
+                return Err(FnoxError::ImportProviderUnsupported {
+                    provider: self.provider.clone(),
+                    help: "Remote storage providers are not yet supported for import. Use an encryption provider like 'age' instead.".to_string(),
+                });
+            } else {
+                return Err(FnoxError::ImportProviderUnsupported {
+                    provider: self.provider.clone(),
+                    help: "Provider does not support encryption or remote storage".to_string(),
+                });
+            }
+        }
+
+        // In dry-run mode, show what would be imported and exit
+        // (provider and capability validation above ensures dry-run fails on invalid provider)
+        if self.dry_run {
+            let dry_run_label = console::style("[dry-run]").yellow().bold();
+            let styled_profile = console::style(&profile).magenta();
+            let styled_provider = console::style(&self.provider).green();
+            let global_suffix = if self.global { " (global)" } else { "" };
+
+            println!(
+                "{dry_run_label} Would import {} secrets into profile {styled_profile} using provider {styled_provider}{global_suffix}:",
+                secrets.len()
+            );
+            for key in secrets.keys() {
+                println!("  {}", console::style(key).cyan());
+            }
             return Ok(());
         }
 
@@ -115,7 +182,7 @@ impl ImportCommand {
             let mut response = String::new();
             io::stdin()
                 .read_line(&mut response)
-                .map_err(|e| miette::miette!("Failed to read response: {}", e))?;
+                .map_err(|e| FnoxError::StdinReadFailed { source: e })?;
 
             if !response.trim().to_lowercase().starts_with('y') {
                 println!("Import cancelled");
@@ -123,93 +190,68 @@ impl ImportCommand {
             }
         }
 
-        // Verify provider exists
-        let providers = config.get_providers(&profile);
-        let provider_config = providers.get(&self.provider).ok_or_else(|| {
-            miette::miette!(
-                "Provider '{}' not found in profile '{}'. Available providers: {}",
-                self.provider,
-                profile,
-                providers
-                    .keys()
-                    .map(|k| k.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
+        // Determine the target config file path
+        let target_path = if self.global {
+            let global_path = Config::global_config_path();
+            // Create parent directory if it doesn't exist
+            if let Some(parent) = global_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| FnoxError::CreateDirFailed {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
+            global_path
+        } else {
+            cli.config.clone()
+        };
 
-        // Get provider and check its capabilities
-        let provider = crate::providers::get_provider(provider_config)?;
-        let capabilities = provider.capabilities();
+        // Load existing target config to preserve metadata on re-import
+        let mut existing_config = if target_path.exists() {
+            Some(Config::load(&target_path)?)
+        } else {
+            None
+        };
 
-        if capabilities.is_empty() {
-            return Err(miette::miette!(
-                "Provider '{}' has no capabilities defined",
-                self.provider
-            )
-            .into());
-        }
+        // Build the secrets to import (encrypt each value)
+        let mut import_secrets = IndexMap::new();
+        let total_secrets = secrets.len();
 
-        let is_encryption_provider =
-            capabilities.contains(&crate::providers::ProviderCapability::Encryption);
-        let is_remote_storage_provider =
-            capabilities.contains(&crate::providers::ProviderCapability::RemoteStorage);
+        for (key, value) in secrets {
+            // Start from existing config if key already exists, to preserve metadata
+            // (description, if_missing, default, as_file, etc.)
+            let mut secret_config = existing_config
+                .as_mut()
+                .and_then(|c| c.get_secrets_mut(&profile).shift_remove(&key))
+                .unwrap_or_default();
 
-        // Process and encrypt/store each secret
-        {
-            let profile_secrets = config.get_secrets_mut(&profile);
-            let total_secrets = secrets.len();
+            // Set the provider
+            secret_config.set_provider(Some(self.provider.clone()));
 
-            for (key, value) in secrets {
-                let secret_config = profile_secrets.entry(key.clone()).or_default();
-
-                // Set the provider
-                secret_config.provider = Some(self.provider.clone());
-
-                // Handle encryption or remote storage based on provider capabilities
-                if is_encryption_provider {
-                    // Encrypt the value
-                    match provider
-                        .encrypt(
-                            &value,
-                            cli.age_key_file.as_ref().map(PathBuf::from).as_deref(),
-                        )
-                        .await
-                    {
-                        Ok(encrypted) => {
-                            secret_config.value = Some(encrypted);
-                        }
-                        Err(e) => {
-                            return Err(miette::miette!(
-                                "Failed to encrypt secret '{}' with provider '{}': {}",
-                                key,
-                                self.provider,
-                                e
-                            )
-                            .into());
-                        }
-                    }
-                } else if is_remote_storage_provider {
-                    return Err(miette::miette!(
-                        "Remote storage providers are not yet supported for import. Use an encryption provider like 'age' instead."
-                    )
-                    .into());
-                } else {
-                    return Err(miette::miette!(
-                        "Provider '{}' does not support encryption or remote storage",
-                        self.provider
-                    )
-                    .into());
+            // Encrypt the value (provider already validated as encryption provider)
+            match provider.encrypt(&value).await {
+                Ok(encrypted) => {
+                    secret_config.set_value(Some(encrypted));
+                }
+                Err(e) => {
+                    return Err(FnoxError::ImportEncryptionFailed {
+                        key: key.clone(),
+                        provider: self.provider.clone(),
+                        details: e.to_string(),
+                    });
                 }
             }
 
-            println!(
-                "✓ Imported {} secrets into profile '{}' using provider '{}'",
-                total_secrets, profile, self.provider
-            );
+            import_secrets.insert(key, secret_config);
         }
 
-        config.save(&cli.config)?;
+        // Save secrets directly to the TOML document, preserving comments
+        Config::save_secrets_to_source(&import_secrets, &profile, &target_path)?;
+
+        let global_suffix = if self.global { " (global)" } else { "" };
+        println!(
+            "✓ Imported {} secrets into profile '{}' using provider '{}'{}",
+            total_secrets, profile, self.provider, global_suffix
+        );
 
         Ok(())
     }
@@ -217,30 +259,34 @@ impl ImportCommand {
     fn read_input(&self) -> Result<String> {
         if let Some(ref input_path) = self.input {
             // Read from specified file
-            let input = std::fs::read_to_string(input_path).map_err(|e| {
-                miette::miette!(
-                    "Failed to read input file '{}': {}",
-                    input_path.display(),
-                    e
-                )
-            })?;
+            let input =
+                std::fs::read_to_string(input_path).map_err(|e| FnoxError::ImportReadFailed {
+                    path: input_path.clone(),
+                    source: e,
+                })?;
             Ok(input)
         } else {
             // Read from stdin
             let mut input = String::new();
             io::stdin()
                 .read_to_string(&mut input)
-                .map_err(|e| miette::miette!("Failed to read from stdin: {}", e))?;
+                .map_err(|source| FnoxError::StdinReadFailed { source })?;
             Ok(input)
         }
     }
 
     fn parse_input(&self, input: &str) -> Result<HashMap<String, String>> {
+        let source_name = self
+            .input
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<stdin>".to_string());
+
         match self.format {
             ImportFormat::Env => self.parse_env(input),
-            ImportFormat::Json => self.parse_json(input),
-            ImportFormat::Yaml => self.parse_yaml(input),
-            ImportFormat::Toml => self.parse_toml(input),
+            ImportFormat::Json => self.parse_json(input, &source_name),
+            ImportFormat::Yaml => self.parse_yaml(input, &source_name),
+            ImportFormat::Toml => self.parse_toml(input, &source_name),
         }
     }
 
@@ -287,33 +333,114 @@ impl ImportCommand {
         Ok(())
     }
 
-    fn parse_json(&self, input: &str) -> Result<HashMap<String, String>> {
-        let data: serde_json::Value = serde_json::from_str(input)
-            .map_err(|e| miette::miette!("Failed to parse JSON: {}", e))?;
-
+    fn parse_json(&self, input: &str, source_name: &str) -> Result<HashMap<String, String>> {
+        let data: serde_json::Value = serde_json::from_str(input).map_err(|e| {
+            // serde_json provides line and column
+            let offset = self.offset_from_line_col(input, e.line(), e.column());
+            FnoxError::ImportParseErrorWithSource {
+                format: "JSON".to_string(),
+                details: e.to_string(),
+                src: Arc::new(NamedSource::new(source_name, Arc::new(input.to_string()))),
+                span: SourceSpan::new(offset.into(), 1usize),
+            }
+        })?;
         self.extract_string_values(&data)
     }
 
-    fn parse_yaml(&self, input: &str) -> Result<HashMap<String, String>> {
-        let data: serde_yaml::Value = serde_yaml::from_str(input)
-            .map_err(|e| miette::miette!("Failed to parse YAML: {}", e))?;
-
+    fn parse_yaml(&self, input: &str, source_name: &str) -> Result<HashMap<String, String>> {
+        let data: serde_yaml::Value = serde_yaml::from_str(input).map_err(|e| {
+            // serde_yaml provides location via e.location()
+            // Note: serde_yaml uses 0-indexed line/column, so we add 1 for our 1-indexed function
+            if let Some(loc) = e.location() {
+                let offset = self.offset_from_line_col(input, loc.line() + 1, loc.column() + 1);
+                FnoxError::ImportParseErrorWithSource {
+                    format: "YAML".to_string(),
+                    details: e.to_string(),
+                    src: Arc::new(NamedSource::new(source_name, Arc::new(input.to_string()))),
+                    span: SourceSpan::new(offset.into(), 1usize),
+                }
+            } else {
+                FnoxError::Config(format!("Failed to parse YAML: {}", e))
+            }
+        })?;
         self.extract_string_values(&data)
     }
 
-    fn parse_toml(&self, input: &str) -> Result<HashMap<String, String>> {
-        let data: serde_json::Value = toml_edit::de::from_str(input)
-            .map_err(|e| miette::miette!("Failed to parse TOML: {}", e))?;
-
+    fn parse_toml(&self, input: &str, source_name: &str) -> Result<HashMap<String, String>> {
+        let data: serde_json::Value = toml_edit::de::from_str(input).map_err(|e| {
+            // toml_edit provides span via e.span()
+            if let Some(span) = e.span() {
+                FnoxError::ImportParseErrorWithSource {
+                    format: "TOML".to_string(),
+                    details: e.to_string(),
+                    src: Arc::new(NamedSource::new(source_name, Arc::new(input.to_string()))),
+                    span: SourceSpan::new(span.start.into(), span.end - span.start),
+                }
+            } else {
+                FnoxError::Config(format!("Failed to parse TOML: {}", e))
+            }
+        })?;
         self.extract_string_values(&data)
+    }
+
+    /// Convert line/column (1-indexed) to byte offset for miette source spans.
+    ///
+    /// Handles both LF and CRLF line endings (CRLF is handled because we detect
+    /// line boundaries at '\n', and '\r' is just part of line content).
+    /// The column is treated as a character count, which is converted to the
+    /// correct byte offset for multi-byte UTF-8.
+    ///
+    /// Note: serde_json may return line=0, col=0 for certain errors (type mismatches,
+    /// custom errors) where position info isn't available. We return 0 in that case.
+    fn offset_from_line_col(&self, input: &str, line: usize, col: usize) -> usize {
+        // Handle invalid 0-indexed values (serde_json can return 0,0 for some errors)
+        if line == 0 || col == 0 {
+            return 0;
+        }
+
+        let mut current_line = 1;
+        let mut line_start_byte = 0;
+
+        // Find the byte offset of the target line by scanning for newlines
+        for (byte_idx, c) in input.char_indices() {
+            if current_line == line {
+                // Found the start of target line
+                line_start_byte = byte_idx;
+                break;
+            }
+            if c == '\n' {
+                current_line += 1;
+                // Set line_start_byte to byte after newline for next iteration
+                line_start_byte = byte_idx + 1;
+            }
+        }
+
+        // If requested line is beyond the file, return end of input
+        if current_line < line {
+            return input.len();
+        }
+
+        // Defensive: clamp line_start_byte to input length
+        // (should not happen with current logic, but guards against edge cases)
+        let line_start_byte = line_start_byte.min(input.len());
+
+        // Now count characters from line_start to find the column byte offset
+        // col is 1-indexed, so we want to skip (col - 1) characters
+        let chars_to_skip = col.saturating_sub(1);
+        let line_slice = &input[line_start_byte..];
+
+        line_slice
+            .char_indices()
+            .nth(chars_to_skip)
+            .map(|(byte_offset, _)| line_start_byte + byte_offset)
+            .unwrap_or(input.len())
     }
 
     fn extract_string_values<V>(&self, data: &V) -> Result<HashMap<String, String>>
     where
         V: serde::Serialize,
     {
-        let json_value = serde_json::to_value(data)
-            .map_err(|e| miette::miette!("Failed to convert data: {}", e))?;
+        let json_value = serde_json::to_value(data)?;
 
         let mut secrets = HashMap::new();
 

@@ -1,23 +1,42 @@
 use anyhow::Result;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::SystemTime;
 
 /// Session state that persists between hook-env invocations
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookEnvSession {
     /// Current working directory when session was created
+    #[serde(default)]
     pub dir: Option<PathBuf>,
     /// Path to fnox.toml file that was loaded (if any)
+    #[serde(default)]
     pub config_path: Option<PathBuf>,
     /// Last modification time of fnox.toml (milliseconds since epoch)
+    #[serde(default)]
     pub config_mtime: Option<u128>,
-    /// Secrets that were loaded
-    pub loaded_secrets: HashMap<String, String>,
+    /// BLAKE3 hashes of secret values (for change detection)
+    /// Keys of this map are the secret names (used for deactivation)
+    /// Hashed with the session's hash_key to prevent offline dictionary attacks
+    /// Uses IndexMap to preserve insertion order
+    #[serde(default)]
+    pub secret_hashes: IndexMap<String, String>,
+    /// Random key used for BLAKE3 keyed hashing (unique per session)
+    /// This prevents correlation of hashes across different sessions
+    #[serde(default)]
+    pub hash_key: [u8; 32],
     /// Hash of FNOX_* environment variables for change detection
+    #[serde(default)]
     pub env_var_hash: String,
+    /// Hash of all config files in the hierarchy for change detection
+    #[serde(default)]
+    pub config_files_hash: String,
+    /// Paths to temporary files for file-based secrets (key -> file_path)
+    #[serde(default)]
+    pub temp_files: HashMap<String, String>,
 }
 
 /// Global previous session state, loaded from __FNOX_SESSION env var
@@ -36,6 +55,7 @@ impl HookEnvSession {
         dir: Option<PathBuf>,
         config_path: Option<PathBuf>,
         loaded_secrets: HashMap<String, String>,
+        temp_files: HashMap<String, String>,
     ) -> Result<Self> {
         let config_mtime = if let Some(ref path) = config_path {
             std::fs::metadata(path)
@@ -49,12 +69,45 @@ impl HookEnvSession {
 
         let env_var_hash = hash_fnox_env_vars();
 
+        // Calculate hash of all config files in the hierarchy
+        let config_files_hash = if let Some(ref d) = dir {
+            let configs = collect_config_files(d);
+            hash_config_files(&configs)
+        } else {
+            String::new()
+        };
+
+        // Generate a random key for this session's hashes
+        use blake3::Hasher;
+        let hash_key = *Hasher::new()
+            .update(b"fnox-session-")
+            .update(
+                &std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .to_le_bytes(),
+            )
+            .update(&std::process::id().to_le_bytes())
+            .finalize()
+            .as_bytes();
+
+        // Compute hashes (not storing plaintext values)
+        // Use IndexMap to preserve insertion order
+        let secret_hashes: IndexMap<String, String> = loaded_secrets
+            .iter()
+            .map(|(k, v)| (k.clone(), hash_secret_with_key(&hash_key, k, v)))
+            .collect();
+
         Ok(Self {
             dir,
             config_path,
             config_mtime,
-            loaded_secrets,
+            secret_hashes,
+            hash_key,
             env_var_hash,
+            config_files_hash,
+            temp_files,
         })
     }
 
@@ -73,6 +126,22 @@ fn decode_session(encoded: &str) -> Result<HookEnvSession> {
         .map_err(|e| anyhow::anyhow!("failed to decompress session: {:?}", e))?;
     let session = rmp_serde::from_slice(&bytes)?;
     Ok(session)
+}
+
+/// Compute a BLAKE3 keyed hash of a secret value using a session-specific key
+/// We use the secret key name as part of the hash to ensure different secrets
+/// with the same value have different hashes (domain separation)
+fn hash_secret_with_key(hash_key: &[u8; 32], key: &str, value: &str) -> String {
+    let mut hasher = blake3::Hasher::new_keyed(hash_key);
+    hasher.update(key.as_bytes());
+    hasher.update(b"\x00"); // separator
+    hasher.update(value.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Public API for computing hashes with a given session's key
+pub fn hash_secret_value_with_session(session: &HookEnvSession, key: &str, value: &str) -> String {
+    hash_secret_with_key(&session.hash_key, key, value)
 }
 
 /// Check if we should exit early (optimization)
@@ -106,43 +175,87 @@ fn has_directory_changed() -> bool {
     PREV_SESSION.dir != current_dir
 }
 
-/// Check if fnox.toml has been modified since last run
+/// Check if any config files in the hierarchy have been modified since last run
+/// This checks all fnox.toml and fnox.local.toml files from current directory up to root
 fn has_config_been_modified() -> bool {
     let current_dir = match std::env::current_dir() {
         Ok(dir) => dir,
-        Err(_) => return false,
+        Err(_) => return true, // If we can't get current dir, force reload
     };
 
-    let config_path = current_dir.join("fnox.toml");
+    // Build a hash of all current config files and their mtimes
+    let current_configs = collect_config_files(&current_dir);
+    let current_hash = hash_config_files(&current_configs);
 
-    // Check if config exists now but didn't before
-    if config_path.exists() && PREV_SESSION.config_path.is_none() {
-        return true;
+    // Compare with the stored hash from the previous session
+    if PREV_SESSION.config_files_hash.is_empty() {
+        // Old session without config_files_hash - use conservative fallback
+        // Without the hash, we can't reliably detect changes, so we must be conservative:
+        // - Reload if there was a previous config (might have changed or been deleted)
+        // - Reload if there's a current config (might be new or changed)
+        // - Only skip if neither previous nor current config exists
+        let had_config = PREV_SESSION.config_path.is_some();
+        let has_config = !current_configs.is_empty();
+        return had_config || has_config;
     }
 
-    // Check if config existed before but doesn't now
-    if !config_path.exists() && PREV_SESSION.config_path.is_some() {
-        return true;
-    }
+    // Compare the current hash with the stored hash
+    current_hash != PREV_SESSION.config_files_hash
+}
 
-    // Check if config path changed
-    if PREV_SESSION.config_path.as_deref() != Some(&config_path) {
-        return true;
-    }
+/// Collect all config files (including dotfile variants) from dir up to root,
+/// plus the global config, for change detection.
+fn collect_config_files(start_dir: &Path) -> Vec<(PathBuf, u128)> {
+    use crate::config::Config;
 
-    // Check if modification time changed
-    if let Some(prev_mtime) = PREV_SESSION.config_mtime
-        && let Ok(metadata) = std::fs::metadata(&config_path)
-        && let Ok(modified) = metadata.modified()
-        && let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH)
-    {
-        let current_mtime = duration.as_millis();
-        if current_mtime != prev_mtime {
-            return true;
+    let mut configs = Vec::new();
+    let mut current = start_dir.to_path_buf();
+
+    // Get profile name using Settings system which respects: CLI flag > Env var > Default
+    let profile_name = crate::settings::Settings::get().profile.clone();
+    let filenames = crate::config::all_config_filenames(Some(&profile_name));
+
+    loop {
+        // Check all config filenames (fnox.toml, .fnox.toml, fnox.$PROFILE.toml, etc.)
+        for filename in &filenames {
+            let config_path = current.join(filename);
+            if let Ok(metadata) = std::fs::metadata(&config_path)
+                && let Ok(modified) = metadata.modified()
+                && let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH)
+            {
+                configs.push((config_path, duration.as_millis()));
+            }
+        }
+
+        // Move to parent directory
+        if !current.pop() {
+            break;
         }
     }
 
-    false
+    // Also check global config for change detection
+    let global = Config::global_config_path();
+    if let Ok(metadata) = std::fs::metadata(&global)
+        && let Ok(modified) = metadata.modified()
+        && let Ok(duration) = modified.duration_since(SystemTime::UNIX_EPOCH)
+    {
+        configs.push((global, duration.as_millis()));
+    }
+
+    configs
+}
+
+/// Create a hash of config files and their modification times
+fn hash_config_files(configs: &[(PathBuf, u128)]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    for (path, mtime) in configs {
+        path.hash(&mut hasher);
+        mtime.hash(&mut hasher);
+    }
+    format!("{:x}", hasher.finish())
 }
 
 /// Check if FNOX_* environment variables have changed
@@ -168,19 +281,35 @@ fn hash_fnox_env_vars() -> String {
     format!("{:x}", hasher.finish())
 }
 
-/// Find fnox.toml in current or parent directories
+/// Find fnox.toml, fnox.$FNOX_PROFILE.toml, or fnox.local.toml, searching
+/// from the current directory up through parent directories, then falling
+/// back to the global config path if no local config is found.
 pub fn find_config() -> Option<PathBuf> {
+    use crate::config::{Config, all_config_filenames};
+
+    let profile = crate::settings::Settings::get().profile.clone();
+    let filenames = all_config_filenames(Some(&profile));
+
     let mut current = std::env::current_dir().ok()?;
 
     loop {
-        let config_path = current.join("fnox.toml");
-        if config_path.exists() {
-            return Some(config_path);
+        // Check all config files (returns first match)
+        for filename in &filenames {
+            let path = current.join(filename);
+            if path.exists() {
+                return Some(path);
+            }
         }
 
         if !current.pop() {
             break;
         }
+    }
+
+    // Check global config as fallback
+    let global = Config::global_config_path();
+    if global.is_file() {
+        return Some(global);
     }
 
     None

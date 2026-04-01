@@ -1,14 +1,117 @@
+use crate::auth_prompt::prompt_and_run_auth;
 use crate::config::{Config, IfMissing, SecretConfig};
 use crate::env;
 use crate::error::{FnoxError, Result};
-use crate::providers::get_provider;
+use crate::providers::{ProviderConfig, get_provider_resolved};
 use crate::settings::Settings;
+use crate::source_registry;
+use crate::suggest::{find_similar, format_suggestions};
 use indexmap::IndexMap;
-use std::collections::HashMap; // Used only for internal grouping by provider
+use miette::SourceSpan;
+use std::collections::{HashMap, HashSet};
+
+/// Extract a value from JSON using dot notation (e.g., "nested.path")
+/// Supports escaped dots: "foo\.bar" accesses the literal key "foo.bar"
+fn extract_json_path(json_str: &str, path: &str) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| FnoxError::Config(format!("Failed to parse JSON secret: {}", e)))?;
+
+    let mut current = &value;
+    for part in split_key_path(path) {
+        current = current.get(&part).ok_or_else(|| {
+            FnoxError::Config(format!("JSON path '{}' not found in secret", path))
+        })?;
+    }
+
+    match current {
+        serde_json::Value::String(s) => Ok(s.clone()),
+        serde_json::Value::Null => Ok("null".to_string()),
+        other => Ok(other.to_string()), // Numbers, bools, arrays, objects
+    }
+}
+
+/// Split a key path on unescaped dots, unescaping `\.` to `.` in each part.
+/// Examples:
+///   "foo.bar" -> ["foo", "bar"]
+///   "foo\.bar" -> ["foo.bar"]
+///   "a.b\.c.d" -> ["a", "b.c", "d"]
+///   "foo\\\.bar" -> ["foo\.bar"] (escaped backslash + escaped dot)
+fn split_key_path(key: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = key.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // Escape the next character.
+            if let Some(next_char) = chars.next() {
+                current.push(next_char);
+            } else {
+                // A trailing backslash is treated as a literal backslash.
+                current.push('\\');
+            }
+        } else if c == '.' {
+            parts.push(std::mem::take(&mut current));
+        } else {
+            current.push(c);
+        }
+    }
+
+    parts.push(current);
+    parts
+}
+
+/// Apply post-processing to a secret value based on SecretConfig settings.
+/// When json_path is set, extracts the specified path from a JSON value.
+fn apply_post_processing(value: String, secret_config: &SecretConfig) -> Result<String> {
+    if let Some(ref json_path) = secret_config.json_path {
+        if json_path.is_empty() {
+            return Err(FnoxError::Config("json_path must not be empty".to_string()));
+        }
+        extract_json_path(&value, json_path)
+    } else {
+        Ok(value)
+    }
+}
+
+/// Creates a ProviderNotConfigured error, using source spans when available for better error display.
+fn create_provider_not_configured_error(
+    provider_name: &str,
+    profile: &str,
+    secret_config: &SecretConfig,
+    config: &Config,
+) -> FnoxError {
+    // Find similar provider names for suggestion
+    let providers = config.get_providers(profile);
+    let available_providers: Vec<_> = providers.keys().map(|s| s.as_str()).collect();
+    let similar = find_similar(provider_name, available_providers);
+    let suggestion = format_suggestions(&similar);
+
+    // Try to create a source-aware error if we have both source path and span
+    if let (Some(path), Some(span)) = (&secret_config.source_path, secret_config.provider_span())
+        && let Some(src) = source_registry::get_named_source(path)
+    {
+        return FnoxError::ProviderNotConfiguredWithSource {
+            provider: provider_name.to_string(),
+            profile: profile.to_string(),
+            suggestion,
+            src,
+            span: SourceSpan::new(span.start.into(), span.end - span.start),
+        };
+    }
+
+    // Fall back to the basic error without source highlighting
+    FnoxError::ProviderNotConfigured {
+        provider: provider_name.to_string(),
+        profile: profile.to_string(),
+        config_path: secret_config.source_path.clone(),
+        suggestion,
+    }
+}
 
 /// Resolves the if_missing behavior using the complete priority chain:
 /// 1. CLI flag (--if-missing) via Settings
-/// 2. Environment variable (FNOX_IF_MISSING) via Settings  
+/// 2. Environment variable (FNOX_IF_MISSING) via Settings
 /// 3. Secret-level if_missing
 /// 4. Top-level config if_missing
 /// 5. Base default environment variable (FNOX_IF_MISSING_DEFAULT) via Settings
@@ -95,30 +198,34 @@ pub fn handle_provider_error(
 /// 3. Environment variable
 ///
 /// The raw `value` field is NEVER used directly - it's only used as input to providers.
+/// Post-processing (e.g., JSON path extraction) is applied to all sources consistently.
 pub async fn resolve_secret(
     config: &Config,
     profile: &str,
     key: &str,
     secret_config: &SecretConfig,
-    age_key_file: Option<&std::path::Path>,
 ) -> Result<Option<String>> {
-    // Priority 1: Provider (if specified and has a value)
-    if let Some(value) =
-        try_resolve_from_provider(config, profile, secret_config, age_key_file).await?
-    {
-        return Ok(Some(value));
-    }
+    // Try to get a value from any source (provider, default, or env var)
+    let value_to_process =
+        // Priority 1: Provider (if specified and has a value)
+        if let Some(value) = try_resolve_from_provider(config, profile, secret_config).await? {
+            Some(value)
+        // Priority 2: Default value
+        } else if let Some(default) = &secret_config.default {
+            tracing::debug!("Using default value for secret '{}'", key);
+            Some(default.clone())
+        // Priority 3: Environment variable
+        } else if let Ok(env_value) = env::var(key) {
+            tracing::debug!("Found secret '{}' in current environment", key);
+            Some(env_value)
+        } else {
+            None
+        };
 
-    // Priority 2: Default value
-    if let Some(default) = &secret_config.default {
-        tracing::debug!("Using default value for secret '{}'", key);
-        return Ok(Some(default.clone()));
-    }
-
-    // Priority 3: Environment variable
-    if let Ok(env_value) = env::var(key) {
-        tracing::debug!("Found secret '{}' in current environment", key);
-        return Ok(Some(env_value));
+    // Apply post-processing to whatever value we found (e.g., JSON path extraction)
+    if let Some(value) = value_to_process {
+        let processed = apply_post_processing(value, secret_config)?;
+        return Ok(Some(processed));
     }
 
     // No value found - handle based on if_missing with priority chain
@@ -129,40 +236,107 @@ async fn try_resolve_from_provider(
     config: &Config,
     profile: &str,
     secret_config: &SecretConfig,
-    age_key_file: Option<&std::path::Path>,
 ) -> Result<Option<String>> {
-    // Only try provider if we have a value to pass to it
-    let Some(provider_value) = &secret_config.value else {
-        return Ok(None);
-    };
-
-    // Determine which provider to use
-    let provider_name = if let Some(ref provider_name) = secret_config.provider {
-        // Explicit provider specified
-        provider_name.clone()
-    } else if let Some(default_provider) = config.get_default_provider(profile)? {
-        // Use default provider
-        default_provider
+    // If a sync cache exists, resolve from the sync provider/value instead
+    let (provider_name, provider_value) = if let Some(ref sync) = secret_config.sync {
+        (sync.provider.clone(), sync.value.clone())
     } else {
-        // No provider configured, can't resolve
-        return Ok(None);
+        // Only try provider if we have a value to pass to it
+        let Some(pv) = secret_config.value() else {
+            return Ok(None);
+        };
+
+        // Determine which provider to use
+        let pn = if let Some(provider_name) = secret_config.provider() {
+            // Explicit provider specified
+            provider_name.to_string()
+        } else if let Some(default_provider) = config.get_default_provider(profile)? {
+            // Use default provider
+            default_provider
+        } else {
+            // No provider configured, can't resolve
+            return Ok(None);
+        };
+        (pn, pv.to_string())
     };
 
     // Get the provider config
     let providers = config.get_providers(profile);
-    let provider_config =
-        providers
-            .get(&provider_name)
-            .ok_or_else(|| FnoxError::ProviderNotConfigured {
-                provider: provider_name.clone(),
-                profile: profile.to_string(),
-                config_path: config.provider_sources.get(&provider_name).cloned(),
-            })?;
+    let provider_config = providers.get(&provider_name).ok_or_else(|| {
+        create_provider_not_configured_error(&provider_name, profile, secret_config, config)
+    })?;
 
-    // Resolve from provider
-    let provider = get_provider(provider_config)?;
-    let value = provider.get_secret(provider_value, age_key_file).await?;
-    Ok(Some(value))
+    // Try to resolve the secret, with auth retry on failure
+    try_resolve_with_auth_retry(
+        config,
+        profile,
+        &provider_name,
+        provider_config,
+        &provider_value,
+    )
+    .await
+}
+
+/// Attempts to resolve a secret from a provider, with optional auth retry.
+/// If the initial attempt fails and we're in a TTY with auth prompting enabled,
+/// prompts the user to run the auth command and retries once.
+async fn try_resolve_with_auth_retry(
+    config: &Config,
+    profile: &str,
+    provider_name: &str,
+    provider_config: &ProviderConfig,
+    provider_value: &str,
+) -> Result<Option<String>> {
+    // Initial secret retrieval attempt before any authentication retry logic
+    match try_get_secret(
+        config,
+        profile,
+        provider_name,
+        provider_config,
+        provider_value,
+    )
+    .await
+    {
+        Ok(value) => Ok(Some(value)),
+        Err(error) => {
+            // Try auth prompt and retry
+            if prompt_and_run_auth(config, provider_config, provider_name, &error)? {
+                // Auth command ran successfully, retry
+                try_get_secret(
+                    config,
+                    profile,
+                    provider_name,
+                    provider_config,
+                    provider_value,
+                )
+                .await
+                .map(Some)
+            } else {
+                // No auth prompt or user declined
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Helper to get a single secret from a provider without auth retry logic.
+/// Creates the provider instance and calls `get_secret`.
+async fn try_get_secret(
+    config: &Config,
+    profile: &str,
+    provider_name: &str,
+    provider_config: &ProviderConfig,
+    provider_value: &str,
+) -> Result<String> {
+    if crate::env::is_non_interactive() && provider_config.requires_interactive_auth() {
+        return Err(FnoxError::Provider(format!(
+            "Provider '{}' requires interactive authentication and cannot be used in non-interactive mode. Use 'fnox exec' instead.",
+            provider_name
+        )));
+    }
+
+    let provider = get_provider_resolved(config, profile, provider_name, provider_config).await?;
+    provider.get_secret(provider_value).await
 }
 
 fn handle_missing_secret(
@@ -190,95 +364,105 @@ fn handle_missing_secret(
 
 /// Resolves multiple secrets efficiently using batch operations when possible.
 ///
-/// This groups secrets by provider and uses `get_secrets_batch` to minimize
-/// external API calls. Providers are processed in parallel for maximum efficiency.
+/// Secrets are resolved in dependency order using Kahn's algorithm. If a provider
+/// declares env var dependencies (e.g., 1Password needs `OP_SERVICE_ACCOUNT_TOKEN`),
+/// and another secret provides that env var (e.g., an age-encrypted secret named
+/// `OP_SERVICE_ACCOUNT_TOKEN`), the dependency is resolved first. Between resolution
+/// levels, resolved values are set as environment variables so subsequent providers
+/// can read them.
 ///
 /// Returns an error immediately if any secret with `if_missing = "error"` fails to resolve.
 pub async fn resolve_secrets_batch(
     config: &Config,
     profile: &str,
     secrets: &IndexMap<String, SecretConfig>,
-    age_key_file: Option<&std::path::Path>,
 ) -> Result<IndexMap<String, Option<String>>> {
-    use futures::stream::{self, StreamExt};
-
-    // Group secrets by provider
-    let mut by_provider: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    // Classify each secret: provider-backed vs no-provider
+    let mut secret_provider: HashMap<String, (String, String)> = HashMap::new(); // key -> (provider_name, provider_value)
     let mut no_provider = Vec::new();
 
+    let providers = config.get_providers(profile);
+
     for (key, secret_config) in secrets {
-        // Check if we can resolve from provider
-        if let Some(ref provider_value) = secret_config.value {
-            // Determine which provider to use
-            let provider_name = if let Some(ref provider_name) = secret_config.provider {
-                provider_name.clone()
+        // If a sync cache exists, use the sync provider/value
+        if let Some(ref sync) = secret_config.sync {
+            secret_provider.insert(key.clone(), (sync.provider.clone(), sync.value.clone()));
+            continue;
+        }
+
+        if let Some(provider_value) = secret_config.value() {
+            let provider_name = if let Some(provider_name) = secret_config.provider() {
+                provider_name.to_string()
             } else if let Ok(Some(default_provider)) = config.get_default_provider(profile) {
                 default_provider
             } else {
-                // No provider, fall back to individual resolution
                 no_provider.push(key.clone());
                 continue;
             };
 
-            by_provider
-                .entry(provider_name)
-                .or_default()
-                .push((key.clone(), provider_value.clone()));
+            secret_provider.insert(key.clone(), (provider_name, provider_value.to_string()));
         } else {
-            // No value for provider, use individual resolution
             no_provider.push(key.clone());
         }
     }
 
-    // Resolve secrets grouped by provider in parallel
-    let provider_results: Vec<_> = stream::iter(by_provider)
-        .map(|(provider_name, provider_secrets)| async move {
-            resolve_provider_batch(
-                config,
-                profile,
-                secrets,
-                &provider_name,
-                provider_secrets,
-                age_key_file,
-            )
-            .await
+    // Build dependency graph and compute resolution levels using Kahn's algorithm.
+    let env_deps_for_secret: HashMap<String, &[&str]> = secret_provider
+        .iter()
+        .map(|(key, (provider_name, _))| {
+            let deps = providers
+                .get(provider_name)
+                .map(|pc| pc.env_dependencies())
+                .unwrap_or(&[]);
+            (key.clone(), deps)
         })
-        .buffer_unordered(10)
-        .collect()
-        .await;
+        .collect();
 
-    // Combine results from all providers into a temporary HashMap, failing fast on errors
-    let mut temp_results = HashMap::new();
-    for provider_result in provider_results {
-        temp_results.extend(provider_result?);
+    let all_keys: Vec<String> = secrets.keys().cloned().collect();
+    let no_provider_set: HashSet<&str> = no_provider.iter().map(|s| s.as_str()).collect();
+    let (levels, cycle) =
+        compute_resolution_levels(&all_keys, &env_deps_for_secret, &no_provider_set);
+
+    // Resolve each level in order
+    let mut temp_results: HashMap<String, Option<String>> = HashMap::new();
+
+    for ready in &levels {
+        let level_results = resolve_level(
+            config,
+            profile,
+            secrets,
+            &secret_provider,
+            &no_provider,
+            ready,
+        )
+        .await?;
+
+        // Set resolved env vars so next level's providers can see them
+        for (key, value) in &level_results {
+            if let Some(val) = value {
+                env::set_var(key, val);
+            }
+        }
+
+        temp_results.extend(level_results);
     }
 
-    // Resolve secrets that couldn't be batched using individual resolution in parallel
-    let no_provider_results: Vec<_> = stream::iter(no_provider)
-        .map(|key| async move {
-            let secret_config = &secrets[&key];
-            match resolve_secret(config, profile, &key, secret_config, age_key_file).await {
-                Ok(value) => Ok((key, value)),
-                Err(e) => {
-                    let if_missing = resolve_if_missing_behavior(secret_config, config);
-                    if let Some(error) = handle_provider_error(&key, e, if_missing, true) {
-                        // Error should fail fast - return the error
-                        Err(error)
-                    } else {
-                        // Warn or ignore - continue with None
-                        Ok((key, None))
-                    }
-                }
-            }
-        })
-        .buffer_unordered(10)
-        .collect()
-        .await;
-
-    // Add no-provider results to temporary HashMap, failing fast on errors
-    for result in no_provider_results {
-        let (key, value) = result?;
-        temp_results.insert(key, value);
+    // Handle any remaining secrets (cycles) - resolve best-effort
+    if !cycle.is_empty() {
+        tracing::warn!(
+            "Detected dependency cycle among secrets: {}. Resolving best-effort.",
+            cycle.join(", ")
+        );
+        let level_results = resolve_level(
+            config,
+            profile,
+            secrets,
+            &secret_provider,
+            &no_provider,
+            &cycle,
+        )
+        .await?;
+        temp_results.extend(level_results);
     }
 
     // Build final results in the original order from the input secrets IndexMap
@@ -292,6 +476,140 @@ pub async fn resolve_secrets_batch(
     Ok(results)
 }
 
+/// Build a dependency graph and compute resolution levels using Kahn's algorithm.
+///
+/// Returns `(levels, cycle)` where `levels` is a vec of vecs (each inner vec is a set of
+/// secrets that can be resolved in parallel), and `cycle` contains any secrets involved
+/// in dependency cycles that couldn't be ordered.
+///
+/// A secret S depends on secret D if S's provider declares an env var dependency
+/// (via `env_dependencies()`) that matches D's key name.
+fn compute_resolution_levels(
+    all_keys: &[String],
+    env_deps_for_secret: &HashMap<String, &[&str]>,
+    no_provider: &HashSet<&str>,
+) -> (Vec<Vec<String>>, Vec<String>) {
+    let secret_keys: HashSet<&str> = all_keys.iter().map(|k| k.as_str()).collect();
+    let mut in_degree: HashMap<String, usize> = HashMap::new();
+    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (key, deps) in env_deps_for_secret {
+        let mut degree = 0usize;
+        for dep_env in *deps {
+            if secret_keys.contains(dep_env) && *dep_env != key.as_str() {
+                degree += 1;
+                dependents
+                    .entry(dep_env.to_string())
+                    .or_default()
+                    .push(key.clone());
+            }
+        }
+        in_degree.insert(key.clone(), degree);
+    }
+
+    // No-provider secrets always have in_degree 0
+    for key in all_keys {
+        if no_provider.contains(key.as_str()) {
+            in_degree.insert(key.clone(), 0);
+        }
+    }
+
+    let mut remaining: std::collections::HashSet<String> = in_degree.keys().cloned().collect();
+    let mut levels = Vec::new();
+
+    loop {
+        let ready: Vec<String> = remaining
+            .iter()
+            .filter(|k| in_degree.get(*k).copied().unwrap_or(0) == 0)
+            .cloned()
+            .collect();
+
+        if ready.is_empty() {
+            break;
+        }
+
+        for k in &ready {
+            remaining.remove(k);
+        }
+
+        // Decrement in-degrees for dependents of this level
+        for key in &ready {
+            if let Some(deps) = dependents.get(key) {
+                for dep in deps {
+                    if let Some(d) = in_degree.get_mut(dep) {
+                        *d = d.saturating_sub(1);
+                    }
+                }
+            }
+        }
+
+        levels.push(ready);
+    }
+
+    let cycle: Vec<String> = remaining.into_iter().collect();
+    (levels, cycle)
+}
+
+/// Resolve a single level of secrets (all can be resolved in parallel).
+async fn resolve_level(
+    config: &Config,
+    profile: &str,
+    secrets: &IndexMap<String, SecretConfig>,
+    secret_provider: &HashMap<String, (String, String)>,
+    no_provider: &[String],
+    ready: &[String],
+) -> Result<HashMap<String, Option<String>>> {
+    use futures::stream::{self, StreamExt};
+
+    // Split ready keys into provider-backed and no-provider
+    let mut by_provider: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut level_no_provider = Vec::new();
+
+    for key in ready {
+        if let Some((provider_name, provider_value)) = secret_provider.get(key) {
+            by_provider
+                .entry(provider_name.clone())
+                .or_default()
+                .push((key.clone(), provider_value.clone()));
+        } else if no_provider.contains(key) {
+            level_no_provider.push(key.clone());
+        }
+    }
+
+    let mut temp_results = HashMap::new();
+
+    // Resolve provider-backed secrets in parallel by provider
+    let provider_results: Vec<_> = stream::iter(by_provider)
+        .map(|(provider_name, provider_secrets)| async move {
+            resolve_provider_batch(config, profile, secrets, &provider_name, provider_secrets).await
+        })
+        .buffer_unordered(10)
+        .collect()
+        .await;
+
+    for provider_result in provider_results {
+        temp_results.extend(provider_result?);
+    }
+
+    // Resolve no-provider secrets in parallel
+    let no_provider_results: Vec<Result<_>> = stream::iter(level_no_provider)
+        .map(|key| async move {
+            let secret_config = &secrets[&key];
+            let value = resolve_secret(config, profile, &key, secret_config).await?;
+            Ok((key, value))
+        })
+        .buffer_unordered(10)
+        .collect()
+        .await;
+
+    for result in no_provider_results {
+        let (key, value) = result?;
+        temp_results.insert(key, value);
+    }
+
+    Ok(temp_results)
+}
+
 /// Resolve all secrets for a single provider using batch operations
 async fn resolve_provider_batch(
     config: &Config,
@@ -299,7 +617,6 @@ async fn resolve_provider_batch(
     secrets: &IndexMap<String, SecretConfig>,
     provider_name: &str,
     provider_secrets: Vec<(String, String)>,
-    age_key_file: Option<&std::path::Path>,
 ) -> Result<HashMap<String, Option<String>>> {
     let mut results = HashMap::new();
 
@@ -314,6 +631,11 @@ async fn resolve_provider_batch(
     let provider_config = match providers.get(provider_name) {
         Some(config) => config,
         None => {
+            // Find similar provider names for suggestion
+            let available_providers: Vec<_> = providers.keys().map(|s| s.as_str()).collect();
+            let similar = find_similar(provider_name, available_providers);
+            let suggestion = format_suggestions(&similar);
+
             // Provider not configured, handle errors for all secrets
             for (key, _) in &provider_secrets {
                 let secret_config = &secrets[key];
@@ -322,6 +644,7 @@ async fn resolve_provider_batch(
                     provider: provider_name.to_string(),
                     profile: profile.to_string(),
                     config_path: config.provider_sources.get(provider_name).cloned(),
+                    suggestion: suggestion.clone(),
                 };
                 if let Some(error) = handle_provider_error(key, error, if_missing, true) {
                     // Fail fast if if_missing is error
@@ -333,37 +656,185 @@ async fn resolve_provider_batch(
         }
     };
 
-    // Get the provider instance
-    let provider = match get_provider(provider_config) {
-        Ok(p) => p,
-        Err(e) => {
-            // Failed to create provider, handle errors for all secrets
-            let error_msg = format!("Failed to create provider: {}", e);
-            for (key, _) in &provider_secrets {
-                let secret_config = &secrets[key];
-                let if_missing = resolve_if_missing_behavior(secret_config, config);
-                let provider_error = FnoxError::Provider(error_msg.clone());
-                if let Some(error) = handle_provider_error(key, provider_error, if_missing, true) {
-                    // Fail fast if if_missing is error
-                    return Err(error);
-                }
-                results.insert(key.clone(), None);
+    // Skip interactive providers in non-interactive mode (e.g. TUI).
+    // Handle per-secret if_missing policy (like ProviderNotConfigured above)
+    // so other providers at the same resolution level are not affected.
+    if crate::env::is_non_interactive() && provider_config.requires_interactive_auth() {
+        for (key, _) in &provider_secrets {
+            let secret_config = &secrets[key];
+            let if_missing = resolve_if_missing_behavior(secret_config, config);
+            let error = FnoxError::Provider(format!(
+                "Provider '{}' requires interactive authentication and cannot be used in non-interactive mode. Use 'fnox exec' instead.",
+                provider_name
+            ));
+            if let Some(error) = handle_provider_error(key, error, if_missing, true) {
+                return Err(error);
             }
-            return Ok(results);
+            results.insert(key.clone(), None);
         }
-    };
+        return Ok(results);
+    }
 
-    // Call batch method
-    let batch_results = provider
-        .get_secrets_batch(&provider_secrets, age_key_file)
-        .await;
+    // Try to get secrets with auth retry on failure
+    try_batch_with_auth_retry(
+        config,
+        profile,
+        secrets,
+        provider_name,
+        provider_config,
+        &provider_secrets,
+        &mut results,
+    )
+    .await
+}
 
-    // Process batch results
+/// Attempts to resolve secrets in batch with optional auth retry.
+/// If the initial attempt fails and we're in a TTY with auth prompting enabled,
+/// prompts the user to run the auth command and retries once.
+async fn try_batch_with_auth_retry(
+    config: &Config,
+    profile: &str,
+    secrets: &IndexMap<String, SecretConfig>,
+    provider_name: &str,
+    provider_config: &ProviderConfig,
+    provider_secrets: &[(String, String)],
+    results: &mut HashMap<String, Option<String>>,
+) -> Result<HashMap<String, Option<String>>> {
+    // Initial batch secret retrieval attempt before any authentication retry logic
+    match try_get_secrets_batch(
+        config,
+        profile,
+        provider_name,
+        provider_config,
+        provider_secrets,
+    )
+    .await
+    {
+        Ok(batch_results) => {
+            let auth_error = extract_auth_error_from_batch(&batch_results);
+            if let Some(ref auth_err) = auth_error
+                && prompt_and_run_auth(config, provider_config, provider_name, auth_err)?
+            {
+                // Auth prompt successful, retry the batch operation.
+                let retry_results = try_get_secrets_batch(
+                    config,
+                    profile,
+                    provider_name,
+                    provider_config,
+                    provider_secrets,
+                )
+                .await?;
+                process_batch_results(secrets, config, retry_results, results)?;
+                return Ok(std::mem::take(results));
+            }
+            // No auth error, or user declined auth prompt. Process original results.
+            process_batch_results(secrets, config, batch_results, results)?;
+            Ok(std::mem::take(results))
+        }
+        Err(error) => {
+            // Try auth prompt and retry
+            if prompt_and_run_auth(config, provider_config, provider_name, &error)? {
+                // Auth command ran successfully, retry
+                match try_get_secrets_batch(
+                    config,
+                    profile,
+                    provider_name,
+                    provider_config,
+                    provider_secrets,
+                )
+                .await
+                {
+                    Ok(batch_results) => {
+                        process_batch_results(secrets, config, batch_results, results)?;
+                        Ok(std::mem::take(results))
+                    }
+                    Err(retry_error) => Err(retry_error),
+                }
+            } else {
+                // No auth prompt or user declined - apply if_missing handling per secret
+                handle_batch_error(secrets, config, provider_secrets, &error, results)
+            }
+        }
+    }
+}
+
+/// Handle a batch error by applying if_missing logic to each secret
+fn handle_batch_error(
+    secrets: &IndexMap<String, SecretConfig>,
+    config: &Config,
+    provider_secrets: &[(String, String)],
+    error: &FnoxError,
+    results: &mut HashMap<String, Option<String>>,
+) -> Result<HashMap<String, Option<String>>> {
+    for (key, _) in provider_secrets {
+        let secret_config = &secrets[key];
+        let if_missing = resolve_if_missing_behavior(secret_config, config);
+        let provider_error = FnoxError::Provider(error.to_string());
+        if let Some(err) = handle_provider_error(key, provider_error, if_missing, true) {
+            // Fail fast if if_missing is error
+            return Err(err);
+        }
+        results.insert(key.clone(), None);
+    }
+    Ok(std::mem::take(results))
+}
+
+/// Extract the first auth error from batch results, if any.
+/// Returns an owned clone so we can use it without borrowing `batch_results`.
+fn extract_auth_error_from_batch(
+    batch_results: &HashMap<String, Result<String>>,
+) -> Option<FnoxError> {
+    batch_results.values().find_map(|result| match result {
+        Err(FnoxError::ProviderAuthFailed {
+            provider,
+            details,
+            hint,
+            url,
+        }) => Some(FnoxError::ProviderAuthFailed {
+            provider: provider.clone(),
+            details: details.clone(),
+            hint: hint.clone(),
+            url: url.clone(),
+        }),
+        _ => None,
+    })
+}
+
+/// Helper to get multiple secrets in batch from a provider without auth retry logic.
+/// Creates the provider instance and calls `get_secrets_batch` on it.
+async fn try_get_secrets_batch(
+    config: &Config,
+    profile: &str,
+    provider_name: &str,
+    provider_config: &ProviderConfig,
+    provider_secrets: &[(String, String)],
+) -> Result<HashMap<String, Result<String>>> {
+    let provider = get_provider_resolved(config, profile, provider_name, provider_config).await?;
+    Ok(provider.get_secrets_batch(provider_secrets).await)
+}
+
+/// Process batch results and populate the results map
+fn process_batch_results(
+    secrets: &IndexMap<String, SecretConfig>,
+    config: &Config,
+    batch_results: HashMap<String, Result<String>>,
+    results: &mut HashMap<String, Option<String>>,
+) -> Result<()> {
     for (key, result) in batch_results {
         let secret_config = &secrets[&key];
         match result {
             Ok(value) => {
-                results.insert(key, Some(value));
+                // Apply post-processing (e.g., JSON path extraction)
+                match apply_post_processing(value, secret_config) {
+                    Ok(processed) => {
+                        results.insert(key, Some(processed));
+                    }
+                    Err(e) => {
+                        // Post-processing errors (invalid JSON, missing key) are config/data errors,
+                        // not "missing secret" — always fail hard regardless of if_missing.
+                        return Err(e);
+                    }
+                }
             }
             Err(e) => {
                 let if_missing = resolve_if_missing_behavior(secret_config, config);
@@ -375,6 +846,194 @@ async fn resolve_provider_batch(
             }
         }
     }
+    Ok(())
+}
 
-    Ok(results)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to call compute_resolution_levels and sort each level for deterministic assertions.
+    fn compute_sorted(
+        all_keys: &[&str],
+        env_deps: &[(&str, &[&str])],
+        no_provider: &[&str],
+    ) -> (Vec<Vec<String>>, Vec<String>) {
+        let all: Vec<String> = all_keys.iter().map(|s| s.to_string()).collect();
+        let deps: HashMap<String, &[&str]> =
+            env_deps.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        let np: HashSet<&str> = no_provider.iter().copied().collect();
+        let (mut levels, mut cycle) = compute_resolution_levels(&all, &deps, &np);
+        for level in &mut levels {
+            level.sort();
+        }
+        cycle.sort();
+        (levels, cycle)
+    }
+
+    #[test]
+    fn test_no_dependencies() {
+        // All secrets independent — resolved in a single level.
+        let (levels, cycle) =
+            compute_sorted(&["A", "B", "C"], &[("A", &[]), ("B", &[]), ("C", &[])], &[]);
+        assert!(cycle.is_empty());
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0], vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn test_linear_dependency_chain() {
+        // A has no deps, B depends on A, C depends on B.
+        let (levels, cycle) = compute_sorted(
+            &["A", "B", "C"],
+            &[("A", &[]), ("B", &["A"]), ("C", &["B"])],
+            &[],
+        );
+        assert!(cycle.is_empty());
+        assert_eq!(levels.len(), 3);
+        assert_eq!(levels[0], vec!["A"]);
+        assert_eq!(levels[1], vec!["B"]);
+        assert_eq!(levels[2], vec!["C"]);
+    }
+
+    #[test]
+    fn test_diamond_dependency() {
+        // A has no deps, B and C both depend on A, D depends on B and C.
+        let (levels, cycle) = compute_sorted(
+            &["A", "B", "C", "D"],
+            &[("A", &[]), ("B", &["A"]), ("C", &["A"]), ("D", &["B", "C"])],
+            &[],
+        );
+        assert!(cycle.is_empty());
+        assert_eq!(levels.len(), 3);
+        assert_eq!(levels[0], vec!["A"]);
+        assert_eq!(levels[1], vec!["B", "C"]);
+        assert_eq!(levels[2], vec!["D"]);
+    }
+
+    #[test]
+    fn test_cycle_detection() {
+        // A depends on B, B depends on A — cycle.
+        let (levels, cycle) = compute_sorted(&["A", "B"], &[("A", &["B"]), ("B", &["A"])], &[]);
+        assert!(levels.is_empty());
+        assert_eq!(cycle, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn test_partial_cycle() {
+        // A has no deps, B depends on C, C depends on B — B/C cycle, A resolves fine.
+        let (levels, cycle) = compute_sorted(
+            &["A", "B", "C"],
+            &[("A", &[]), ("B", &["C"]), ("C", &["B"])],
+            &[],
+        );
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0], vec!["A"]);
+        assert_eq!(cycle, vec!["B", "C"]);
+    }
+
+    #[test]
+    fn test_no_provider_secrets_at_level_zero() {
+        // NO_PROV has no provider (env-only), OP_SECRET depends on it via env.
+        let (levels, cycle) = compute_sorted(
+            &["NO_PROV", "OP_SECRET"],
+            &[("OP_SECRET", &["NO_PROV"])],
+            &["NO_PROV"],
+        );
+        assert!(cycle.is_empty());
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0], vec!["NO_PROV"]);
+        assert_eq!(levels[1], vec!["OP_SECRET"]);
+    }
+
+    #[test]
+    fn test_dep_on_nonexistent_key_ignored() {
+        // B declares a dependency on "MISSING" which isn't a secret key — ignored.
+        let (levels, cycle) = compute_sorted(&["A", "B"], &[("A", &[]), ("B", &["MISSING"])], &[]);
+        assert!(cycle.is_empty());
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0], vec!["A", "B"]);
+    }
+
+    #[test]
+    fn test_self_dependency_ignored() {
+        // A declares itself as a dependency — should be ignored (not a cycle).
+        let (levels, cycle) = compute_sorted(&["A"], &[("A", &["A"])], &[]);
+        assert!(cycle.is_empty());
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0], vec!["A"]);
+    }
+
+    #[test]
+    fn test_real_world_scenario() {
+        // OP_SERVICE_ACCOUNT_TOKEN is age-encrypted (no env deps).
+        // TUNNEL_TOKEN uses 1Password provider which depends on OP_SERVICE_ACCOUNT_TOKEN.
+        // DB_PASSWORD also uses 1Password.
+        // PLAIN_VAR has no provider.
+        let (levels, cycle) = compute_sorted(
+            &[
+                "OP_SERVICE_ACCOUNT_TOKEN",
+                "TUNNEL_TOKEN",
+                "DB_PASSWORD",
+                "PLAIN_VAR",
+            ],
+            &[
+                ("OP_SERVICE_ACCOUNT_TOKEN", &[]), // age provider
+                (
+                    "TUNNEL_TOKEN",
+                    &["OP_SERVICE_ACCOUNT_TOKEN", "FNOX_OP_SERVICE_ACCOUNT_TOKEN"],
+                ), // 1password
+                (
+                    "DB_PASSWORD",
+                    &["OP_SERVICE_ACCOUNT_TOKEN", "FNOX_OP_SERVICE_ACCOUNT_TOKEN"],
+                ), // 1password
+            ],
+            &["PLAIN_VAR"],
+        );
+        assert!(cycle.is_empty());
+        assert_eq!(levels.len(), 2);
+        // Level 0: age secret + no-provider secret
+        assert_eq!(levels[0], vec!["OP_SERVICE_ACCOUNT_TOKEN", "PLAIN_VAR"]);
+        // Level 1: 1Password secrets that depend on the token
+        assert_eq!(levels[1], vec!["DB_PASSWORD", "TUNNEL_TOKEN"]);
+    }
+
+    #[test]
+    fn test_split_key_path_simple() {
+        assert_eq!(split_key_path("foo"), vec!["foo"]);
+        assert_eq!(split_key_path("foo.bar"), vec!["foo", "bar"]);
+        assert_eq!(split_key_path("a.b.c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_split_key_path_escaped_dot() {
+        // Single escaped dot
+        assert_eq!(split_key_path(r"foo\.bar"), vec!["foo.bar"]);
+        // Escaped dot in the middle of a path
+        assert_eq!(split_key_path(r"a.b\.c.d"), vec!["a", "b.c", "d"]);
+        // Multiple escaped dots
+        assert_eq!(split_key_path(r"foo\.bar\.baz"), vec!["foo.bar.baz"]);
+    }
+
+    #[test]
+    fn test_split_key_path_escaped_backslash() {
+        // Escaped backslash followed by dot (literal backslash + path separator)
+        assert_eq!(split_key_path(r"foo\\.bar"), vec!["foo\\", "bar"]);
+        // Escaped backslash followed by escaped dot
+        assert_eq!(split_key_path(r"foo\\\.bar"), vec!["foo\\.bar"]);
+    }
+
+    #[test]
+    fn test_split_key_path_edge_cases() {
+        // Empty string
+        assert_eq!(split_key_path(""), vec![""]);
+        // Just a dot
+        assert_eq!(split_key_path("."), vec!["", ""]);
+        // Trailing dot
+        assert_eq!(split_key_path("foo."), vec!["foo", ""]);
+        // Leading dot
+        assert_eq!(split_key_path(".foo"), vec!["", "foo"]);
+        // Backslash at end (kept as-is)
+        assert_eq!(split_key_path(r"foo\"), vec!["foo\\"]);
+    }
 }

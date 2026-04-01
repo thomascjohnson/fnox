@@ -7,10 +7,8 @@ AWS Secrets Manager provides centralized secret management with IAM access contr
 ```bash
 # 1. Configure provider in fnox.toml
 cat >> fnox.toml << 'EOF'
-[providers.aws]
-type = "aws-sm"
-region = "us-east-1"
-prefix = "myapp/"
+[providers]
+aws = { type = "aws-sm", region = "us-east-1", prefix = "myapp/" }
 EOF
 
 # 2. Create secret in AWS
@@ -20,9 +18,8 @@ aws secretsmanager create-secret \
 
 # 3. Reference in fnox.toml
 cat >> fnox.toml << 'EOF'
-[secrets.DATABASE_URL]
-provider = "aws"
-value = "database-url"  # With prefix, fetches "myapp/database-url"
+[secrets]
+DATABASE_URL = { provider = "aws", value = "database-url" }  # With prefix, fetches "myapp/database-url"
 EOF
 
 # 4. Fetch secret
@@ -130,11 +127,20 @@ If running on EC2, ECS, Lambda, or other AWS services:
 ### Configure fnox Provider
 
 ```toml
-[providers.aws]
-type = "aws-sm"
-region = "us-east-1"
-prefix = "myapp/"  # Optional: prepended to all secret names
+[providers]
+aws = { type = "aws-sm", region = "us-east-1" }  # minimal config
+
+# With optional fields:
+aws = { type = "aws-sm", region = "us-east-1", profile = "my-aws-profile", prefix = "myapp/" }
 ```
+
+| Field     | Required | Description                                                                                       |
+| --------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `region`  | Yes      | AWS region (e.g. `us-east-1`)                                                                     |
+| `profile` | No       | AWS CLI profile name from `~/.aws/config`. Falls back to the default credential chain if omitted. |
+| `prefix`  | No       | Prepended to all secret names                                                                     |
+
+The `profile` field is useful when you have multiple AWS accounts or roles configured and want to pin a provider to a specific one without relying on `AWS_PROFILE` in the environment.
 
 ## Creating Secrets
 
@@ -173,16 +179,10 @@ aws secretsmanager create-secret \
 Add references to `fnox.toml`:
 
 ```toml
-[secrets.DATABASE_URL]
-provider = "aws"
-value = "database-url"  # → Fetches "myapp/database-url"
-
-[secrets.API_KEY]
-provider = "aws"
-value = "api-key"  # → Fetches "myapp/api-key"
-
-# Without prefix in provider, use full name:
-# value = "myapp/api-key"
+[secrets]
+DATABASE_URL = { provider = "aws", value = "database-url" }  # → Fetches "myapp/database-url"
+API_KEY = { provider = "aws", value = "api-key" }  # → Fetches "myapp/api-key"
+# Without prefix in provider, use full name like: value = "myapp/api-key"
 ```
 
 ## Usage
@@ -212,60 +212,47 @@ fnox exec --profile production -- ./deploy.sh
 The `prefix` is prepended to the `value`:
 
 ```toml
-[providers.aws]
-prefix = "myapp/"
+[providers]
+aws = { prefix = "myapp/" }
 
-[secrets.DATABASE_URL]
-provider = "aws"
-value = "database-url"  # → Fetches "myapp/database-url"
-
-[secrets.API_KEY]
-provider = "aws"
-value = "api-key"  # → Fetches "myapp/api-key"
+[secrets]
+DATABASE_URL = { provider = "aws", value = "database-url" }  # → Fetches "myapp/database-url"
+API_KEY = { provider = "aws", value = "api-key" }  # → Fetches "myapp/api-key"
 ```
 
 Without prefix:
 
 ```toml
-[providers.aws]
-# No prefix
+[providers]
+aws = { }  # No prefix
 
-[secrets.DATABASE_URL]
-provider = "aws"
-value = "myapp/database-url"  # → Fetches "myapp/database-url"
+[secrets]
+DATABASE_URL = { provider = "aws", value = "myapp/database-url" }  # → Fetches "myapp/database-url"
 ```
 
 ## Multi-Environment Example
 
 ```toml
 # Development: age encryption
-[providers.age]
-type = "age"
-recipients = ["age1..."]
+[providers]
+age = { type = "age", recipients = ["age1..."] }
 
-[secrets.DATABASE_URL]
-provider = "age"
-value = "encrypted-dev-db..."
+[secrets]
+DATABASE_URL = { provider = "age", value = "encrypted-dev-db..." }
 
 # Staging: AWS Secrets Manager (us-east-1)
-[profiles.staging.providers.aws]
-type = "aws-sm"
-region = "us-east-1"
-prefix = "myapp-staging/"
+[profiles.staging.providers]
+aws = { type = "aws-sm", region = "us-east-1", prefix = "myapp-staging/" }
 
-[profiles.staging.secrets.DATABASE_URL]
-provider = "aws"
-value = "database-url"  # → myapp-staging/database-url
+[profiles.staging.secrets]
+DATABASE_URL = { provider = "aws", value = "database-url" }  # → myapp-staging/database-url
 
-# Production: AWS Secrets Manager (us-west-2)
-[profiles.production.providers.aws]
-type = "aws-sm"
-region = "us-west-2"
-prefix = "myapp-prod/"
+# Production: AWS Secrets Manager (us-west-2) using a dedicated AWS profile
+[profiles.production.providers]
+aws = { type = "aws-sm", region = "us-west-2", profile = "prod-account", prefix = "myapp-prod/" }
 
-[profiles.production.secrets.DATABASE_URL]
-provider = "aws"
-value = "database-url"  # → myapp-prod/database-url
+[profiles.production.secrets]
+DATABASE_URL = { provider = "aws", value = "database-url" }  # → myapp-prod/database-url
 ```
 
 ```bash
@@ -290,18 +277,44 @@ aws secretsmanager create-secret \
   --secret-string '{"host":"db.example.com","port":"5432","username":"admin","password":"secret"}'
 ```
 
-fnox returns the entire JSON string:
+By default, `fnox` returns the entire JSON string. Use `json_path` to extract specific fields:
+
+```toml
+[providers]
+aws = { type = "aws-sm", region = "us-east-1", prefix = "myapp/" }
+
+[secrets]
+DB_CREDENTIALS = { provider = "aws", value = "db-credentials" }
+DB_PASS = { provider = "aws", value = "db-credentials", json_path = "password" }
+```
 
 ```bash
 fnox get DB_CREDENTIALS
 # Output: {"host":"db.example.com","port":"5432","username":"admin","password":"secret"}
+
+fnox get DB_PASS
+# Output: secret
 ```
 
-To extract a specific field, use `jq`:
+This also supports nested JSON paths using dot notation.
+
+Literal dots need to be escaped (`\.`).
+In TOML, either literal strings have to be used (`'\.'`) or the backslash itself has to be escaped (`"\\."`):
 
 ```bash
-fnox get DB_CREDENTIALS | jq -r '.password'
-# Output: secret
+# Create nested JSON secret
+aws secretsmanager create-secret \
+  --name "myapp/config" \
+  --secret-string '{"database":{"host":"db.example.com","cache.key":"foo"}}'
+```
+
+```toml
+[providers]
+aws = { type = "aws-sm", region = "us-east-1", prefix = "myapp/" }
+
+[secrets]
+DB_HOST = { provider = "aws", value = "config", json_path = "database.host" }
+DB_CACHE_KEY = { provider = "aws", value = "config", json_path = 'database.cache\.key' }
 ```
 
 ## Secret Rotation

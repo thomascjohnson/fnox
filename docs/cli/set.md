@@ -15,7 +15,11 @@ Secret key (environment variable name)
 
 ### `[VALUE]`
 
-Secret value (reads from stdin if not provided)
+Secret value to store.
+
+If omitted: reads from stdin when piped (`echo "x" | fnox set KEY`), or prompts interactively with hidden input.
+
+Passing secrets as arguments exposes them in shell history and `ps` output. For sensitive values, prefer stdin or the interactive prompt.
 
 ## Flags
 
@@ -23,13 +27,25 @@ Secret value (reads from stdin if not provided)
 
 Description of the secret
 
+### `-g --global`
+
+Save to the global config file (~/.config/fnox/config.toml)
+
 ### `-k --key-name <KEY_NAME>`
 
 Key name in the provider (if different from env var name)
 
-### `-P --provider <PROVIDER>`
+### `-n --dry-run`
+
+Show what would be done without making changes
+
+### `-p --provider <PROVIDER>`
 
 Provider to fetch from
+
+### `--base64-encode`
+
+Base64 encode the secret
 
 ### `--default <DEFAULT>`
 

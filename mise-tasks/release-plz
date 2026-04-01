@@ -12,16 +12,16 @@ if [ -z "$released_versions" ] || ! echo "$released_versions" | grep -q "^v$cur_
     # Only create and push the tag - let the release workflow handle creating the release
     git tag "v$cur_version"
     git push --tags
+    cargo publish -p fnox
   fi
   exit 0
 fi
 
 version="$(git cliff --bumped-version)"
-changelog="$(git cliff --bump --unreleased --strip all)"
 
 if [ "$DRY_RUN" -ne 0 ]; then
   echo "version: $version"
-  echo "changelog: $changelog"
+  echo "changelog: $(git cliff --bump --unreleased --strip all | tail -n +3)"
   exit 0
 fi
 
@@ -31,23 +31,32 @@ if [ "$version" = "v$cur_version" ]; then
   exit 0
 fi
 
-git cliff --bump -o CHANGELOG.md
 cargo set-version --package fnox "${version#v}"
 
 git config user.name mise-en-dev
 git config user.email 123107610+mise-en-dev@users.noreply.github.com
 cargo update
+mise run render ::: lint-fix
+
+# Generate changelog using git-cliff (LLM editorialization happens in release.yml after merge)
+git cliff --bump -o CHANGELOG.md
+
+# Get the unreleased notes for PR body
+# Strip version header since PR title already has version
+PR_BODY="$(git cliff --bump --unreleased --strip all | tail -n +3)"
 
 git add \
   Cargo.* \
-  CHANGELOG.md
+  CHANGELOG.md \
+  docs \
+  fnox.usage.kdl
 
 git checkout -B release
 git commit -m "chore: release $version"
 git push origin release --force
 
 # Try to create PR, if it already exists then edit it
-if ! gh pr create --title "chore: release $version" --body "$changelog"; then
+if ! gh pr create --title "chore: release $version" --body "$PR_BODY"; then
   echo "Failed to create PR, attempting to update existing PR"
-  gh pr edit release --title "chore: release $version" --body "$changelog" || true
+  gh pr edit release --title "chore: release $version" --body "$PR_BODY" || true
 fi

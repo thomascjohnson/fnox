@@ -1,17 +1,93 @@
 use crate::env;
 use crate::error::{FnoxError, Result};
+use crate::settings::Settings;
+use crate::source_registry;
+use crate::spanned::SpannedValue;
 use clap::ValueEnum;
 use indexmap::IndexMap;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use strum::VariantNames;
+
+/// Default config filename, used as the clap default for `--config`.
+pub const DEFAULT_CONFIG_FILENAME: &str = "fnox.toml";
+
+/// Returns all config filenames in load order (first = lowest priority, last = highest priority).
+///
+/// Order: main configs → profile configs → local configs
+/// Within each group, non-dotfiles come first (lower priority); dotfiles follow (higher priority).
+pub fn all_config_filenames(profile: Option<&str>) -> Vec<String> {
+    let mut files = vec![
+        DEFAULT_CONFIG_FILENAME.to_string(),
+        ".fnox.toml".to_string(),
+    ];
+    if let Some(p) = profile.filter(|p| *p != "default") {
+        files.push(format!("fnox.{p}.toml"));
+        files.push(format!(".fnox.{p}.toml"));
+    }
+    files.push("fnox.local.toml".to_string());
+    files.push(".fnox.local.toml".to_string());
+    files
+}
+
+/// Returns the local override filename for a supported config basename.
+///
+/// Only `fnox.toml` and `.fnox.toml` have corresponding local override files.
+pub fn local_override_filename(path: &Path) -> Option<&'static str> {
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("fnox.toml") => Some("fnox.local.toml"),
+        Some(".fnox.toml") => Some(".fnox.local.toml"),
+        _ => None,
+    }
+}
+
+/// Find the most appropriate existing config file in `dir` for writing.
+///
+/// When a non-default profile is active, prefers the profile-specific file
+/// (e.g. `fnox.staging.toml`) if it exists, so secrets stay scoped to that
+/// profile. Otherwise falls back to the lowest-priority existing file.
+/// If no config files exist yet, returns `fnox.toml`.
+pub fn find_local_config(dir: &Path, profile: Option<&str>) -> PathBuf {
+    // If a non-default profile is specified, prefer its config file first
+    if let Some(p) = profile.filter(|p| *p != "default") {
+        for name in [format!("fnox.{p}.toml"), format!(".fnox.{p}.toml")] {
+            let path = dir.join(&name);
+            if path.exists() {
+                return path;
+            }
+        }
+    }
+
+    // Fall back to lowest-priority existing base file.
+    // When a profile is active, exclude local files (fnox.local.toml, .fnox.local.toml)
+    // to avoid silently routing profile-scoped secrets into a gitignored local-override file.
+    let is_profiled = profile.is_some_and(|p| p != "default");
+    for name in &["fnox.toml", ".fnox.toml"] {
+        let path = dir.join(name);
+        if path.exists() {
+            return path;
+        }
+    }
+    if !is_profiled {
+        for name in &["fnox.local.toml", ".fnox.local.toml"] {
+            let path = dir.join(name);
+            if path.exists() {
+                return path;
+            }
+        }
+    }
+    dir.join(DEFAULT_CONFIG_FILENAME)
+}
 
 // Re-export ProviderConfig from providers module
 pub use crate::providers::ProviderConfig;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Import paths to other config files
@@ -22,13 +98,17 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "is_false")]
     pub root: bool,
 
+    /// Lease backend configurations (for default profile)
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub leases: IndexMap<String, crate::lease_backends::LeaseBackendConfig>,
+
     /// Provider configurations (for default profile)
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub providers: IndexMap<String, ProviderConfig>,
 
     /// Default provider name for default profile
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_provider: Option<String>,
+    default_provider: Option<SpannedValue<String>>,
 
     /// Default profile secrets (top level)
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
@@ -46,6 +126,14 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub if_missing: Option<IfMissing>,
 
+    /// Whether to prompt for authentication when provider auth fails (default: true in TTY)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_auth: Option<bool>,
+
+    /// MCP server configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<McpConfig>,
+
     /// Track which config file each provider came from (not serialized)
     #[serde(skip)]
     pub provider_sources: HashMap<String, PathBuf>,
@@ -53,10 +141,26 @@ pub struct Config {
     /// Track which config file each secret came from (not serialized)
     #[serde(skip)]
     pub secret_sources: HashMap<String, PathBuf>,
+
+    /// Track which config file the default_provider came from (not serialized)
+    #[serde(skip)]
+    pub default_provider_source: Option<PathBuf>,
+
+    /// The project root directory — the nearest directory to cwd that contains
+    /// a config file. Used for scoping the lease ledger per-project.
+    #[serde(skip)]
+    pub project_dir: Option<PathBuf>,
+}
+
+/// Cached sync data for a secret (provider + encrypted value)
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SyncConfig {
+    pub provider: String,
+    pub value: String,
 }
 
 /// Configuration for a single secret
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SecretConfig {
     /// Description of the secret
@@ -73,28 +177,54 @@ pub struct SecretConfig {
 
     /// Provider to fetch from (age, aws-kms, 1password, aws, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    provider: Option<SpannedValue<String>>,
 
     /// Value for the provider (secret name, encrypted blob, etc.)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
+    value: Option<SpannedValue<String>>,
+
+    /// Whether to inject this secret into env vars (default: true)
+    /// When false, the secret is only accessible via `fnox get`
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub env: bool,
+
+    /// Write secret to a temporary file and set env var to the file path instead of the secret value
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub as_file: bool,
+    /// JSON path to extract from the secret value (supports dot notation: "nested.key")
+    /// When set, the secret value is parsed as JSON and the specified path is extracted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_path: Option<String>,
+
+    /// Cached sync data (provider + encrypted value from `fnox sync`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync: Option<SyncConfig>,
 
     /// Path to the config file where this secret was defined (not serialized)
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+
+    /// Whether this secret was loaded from a [profiles.X.secrets] section (not serialized).
+    /// When false, the secret was loaded from a root-level [secrets] section.
+    #[serde(skip)]
+    pub source_is_profile: bool,
 }
 
 /// Configuration for a profile
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileConfig {
+    /// Lease backend configurations for this profile
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub leases: IndexMap<String, crate::lease_backends::LeaseBackendConfig>,
+
     /// Provider configurations for this profile
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub providers: IndexMap<String, ProviderConfig>,
 
     /// Default provider name for this profile
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_provider: Option<String>,
+    default_provider: Option<SpannedValue<String>>,
 
     /// Secrets for this profile
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
@@ -107,9 +237,105 @@ pub struct ProfileConfig {
     /// Track which config file each secret came from (not serialized)
     #[serde(skip)]
     pub secret_sources: HashMap<String, PathBuf>,
+
+    /// Track which config file the default_provider came from (not serialized)
+    #[serde(skip)]
+    pub default_provider_source: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum, VariantNames)]
+/// Available MCP tools
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTool {
+    GetSecret,
+    Exec,
+}
+
+impl McpTool {
+    /// Returns the tool name as it appears in MCP protocol
+    pub fn tool_name(&self) -> &'static str {
+        match self {
+            McpTool::GetSecret => "get_secret",
+            McpTool::Exec => "exec",
+        }
+    }
+}
+
+/// MCP server configuration
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[derive(Default)]
+pub struct McpConfig {
+    /// Which MCP tools to expose (default: ["get_secret", "exec"])
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "tools")]
+    tools_raw: Option<Vec<McpTool>>,
+
+    /// Timeout in seconds for exec tool subprocess (default: 300, minimum: 1)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub exec_timeout_secs: Option<u64>,
+
+    /// Whether to redact secret values from exec tool output (default: true).
+    /// When enabled, resolved secret values are replaced with [REDACTED] in
+    /// stdout/stderr before returning to the agent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redact_output: Option<bool>,
+
+    /// Optional allowlist of secret names visible to the MCP server.
+    /// When set, only these secrets are resolved and available via get_secret/exec.
+    /// When None, all profile secrets are available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<String>>,
+}
+
+impl McpConfig {
+    fn default_tools() -> Vec<McpTool> {
+        vec![McpTool::GetSecret, McpTool::Exec]
+    }
+
+    /// Whether `tools` was explicitly set in the config file
+    pub fn tools_explicitly_set(&self) -> bool {
+        self.tools_raw.is_some()
+    }
+
+    /// Returns the effective tools list (default if not explicitly set)
+    pub fn tools(&self) -> Vec<McpTool> {
+        self.tools_raw.clone().unwrap_or_else(Self::default_tools)
+    }
+
+    /// Set the tools list explicitly
+    pub fn set_tools(&mut self, tools: Vec<McpTool>) {
+        self.tools_raw = Some(tools);
+    }
+
+    /// Whether exec output redaction is enabled (default: true)
+    pub fn redact_output(&self) -> bool {
+        self.redact_output.unwrap_or(true)
+    }
+
+    /// Filter a secrets map to only include allowed secrets.
+    /// Returns the map unchanged if no allowlist is set.
+    pub fn filter_secrets(
+        &self,
+        secrets: IndexMap<String, SecretConfig>,
+    ) -> IndexMap<String, SecretConfig> {
+        match &self.secrets {
+            None => secrets,
+            Some(allowlist) => {
+                let allowed: std::collections::HashSet<&str> =
+                    allowlist.iter().map(|s| s.as_str()).collect();
+                secrets
+                    .into_iter()
+                    .filter(|(k, _)| allowed.contains(k.as_str()))
+                    .collect()
+            }
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, ValueEnum, VariantNames,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum IfMissing {
     Error,
@@ -122,8 +348,9 @@ impl Config {
     pub fn load_smart<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_ref = path.as_ref();
 
-        // If the path is exactly "fnox.toml" (default), use recursive loading
-        if path_ref == Path::new("fnox.toml") {
+        // If the path is one of the default config filenames, use recursive loading
+        let default_filenames = all_config_filenames(None);
+        if default_filenames.iter().any(|f| path_ref == Path::new(f)) {
             Self::load_with_recursion(path_ref)
         } else {
             // For explicit paths, resolve relative paths against current directory first
@@ -143,11 +370,33 @@ impl Config {
 
     /// Load configuration from a file
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path = path.as_ref();
-        let content = fs::read_to_string(path)
-            .map_err(|e| FnoxError::Config(format!("Failed to read config file: {}", e)))?;
+        use miette::{NamedSource, SourceSpan};
 
-        let mut config: Config = toml_edit::de::from_str(&content)?;
+        let path = path.as_ref();
+        let content = fs::read_to_string(path).map_err(|source| FnoxError::ConfigReadFailed {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+        // Register the source for error reporting
+        source_registry::register(path, content.clone());
+
+        let mut config: Config = toml_edit::de::from_str(&content).map_err(|e| {
+            // Try to create a source-aware error with span highlighting
+            if let Some(span) = e.span() {
+                FnoxError::ConfigParseErrorWithSource {
+                    message: e.message().to_string(),
+                    src: Arc::new(NamedSource::new(
+                        path.display().to_string(),
+                        Arc::new(content),
+                    )),
+                    span: SourceSpan::new(span.start.into(), span.end - span.start),
+                }
+            } else {
+                // Fall back to the basic error if no span available
+                FnoxError::ConfigParseError { source: e }
+            }
+        })?;
 
         // Set source paths for all secrets and providers
         config.set_source_paths(path);
@@ -156,12 +405,12 @@ impl Config {
     }
 
     /// Load configuration with recursive directory search and merging
-    pub fn load_with_recursion<P: AsRef<Path>>(_start_path: P) -> Result<Self> {
+    fn load_with_recursion<P: AsRef<Path>>(_start_path: P) -> Result<Self> {
         // Start from current working directory and search upwards
         let current_dir = env::current_dir()
             .map_err(|e| FnoxError::Config(format!("Failed to get current directory: {}", e)))?;
 
-        match Self::load_recursive(&current_dir, false, false) {
+        match Self::load_recursive(&current_dir, false) {
             Ok((_config, found)) if !found => {
                 // No config file was found anywhere in the directory tree
                 Err(FnoxError::ConfigNotFound {
@@ -172,36 +421,48 @@ impl Config {
                     help: "Run 'fnox init' to create a configuration file".to_string(),
                 })
             }
-            Ok((config, _)) => Ok(config),
+            Ok((mut config, _)) => {
+                // Find the nearest directory to cwd that contains a config file.
+                // This is the project root used for scoping the lease ledger.
+                config.project_dir = Self::find_project_dir(&current_dir);
+                Ok(config)
+            }
             Err(e) => Err(e),
         }
     }
 
     /// Recursively search for fnox.toml files and merge them
     /// Returns (config, found_any) where found_any indicates if any config file was found
-    fn load_recursive(dir: &Path, _from_parent: bool, found_any: bool) -> Result<(Self, bool)> {
-        let config_path = dir.join("fnox.toml");
-        let local_config_path = dir.join("fnox.local.toml");
+    fn load_recursive(dir: &Path, found_any: bool) -> Result<(Self, bool)> {
+        // Get current profile from Settings (respects: CLI flag > Env var > Default)
+        let profile = crate::settings::Settings::get().profile.clone();
+        let filenames = all_config_filenames(Some(&profile));
 
-        let (mut config, mut found) = if config_path.exists() {
-            (Self::load(&config_path)?, true)
-        } else {
-            (Self::new(), found_any)
-        };
+        // Load all existing config files in order (later files override earlier ones)
+        let mut config = Self::new();
+        let mut found = found_any;
 
-        // Load fnox.local.toml if it exists and merge it (takes precedence over fnox.toml)
-        if local_config_path.exists() {
-            let local_config = Self::load(&local_config_path)?;
-            config = Self::merge_configs(config, local_config)?;
-            found = true;
+        for filename in &filenames {
+            let path = dir.join(filename);
+            if path.exists() {
+                let file_config = Self::load(&path)?;
+                config = Self::merge_configs(config, file_config)?;
+                found = true;
+            }
         }
 
-        // If this config marks root, stop recursion
+        // If this config marks root, stop recursion but still load global config
         if config.root {
             // Load imports if any
             for import_path in &config.import.clone() {
                 let import_config = Self::load_import(import_path, dir)?;
                 config = Self::merge_configs(import_config, config)?;
+            }
+            // Load global config as the base even for root configs
+            let (global_config, global_found) = Self::load_global()?;
+            if global_found {
+                config = Self::merge_configs(global_config, config)?;
+                found = true;
             }
             return Ok((config, found));
         }
@@ -214,12 +475,58 @@ impl Config {
 
         // If we have a parent directory, recurse up and merge
         if let Some(parent_dir) = dir.parent() {
-            let (parent_config, parent_found) = Self::load_recursive(parent_dir, true, found)?;
+            let (parent_config, parent_found) = Self::load_recursive(parent_dir, found)?;
             config = Self::merge_configs(parent_config, config)?;
             found = found || parent_found;
+        } else {
+            // At the filesystem root, try to load global config as base
+            let (global_config, global_found) = Self::load_global()?;
+            if global_found {
+                config = Self::merge_configs(global_config, config)?;
+                found = true;
+            }
         }
 
         Ok((config, found))
+    }
+
+    /// Find the nearest directory to `start` that contains a config file.
+    /// Walks upward from `start` and returns the first match.
+    fn find_project_dir(start: &Path) -> Option<PathBuf> {
+        let profile = crate::settings::Settings::get().profile.clone();
+        let filenames = all_config_filenames(Some(&profile));
+        let mut dir = Some(start);
+        while let Some(d) = dir {
+            for filename in &filenames {
+                if d.join(filename).exists() {
+                    return Some(d.to_path_buf());
+                }
+            }
+            dir = d.parent();
+        }
+        None
+    }
+
+    /// Get the path to the global config file
+    pub fn global_config_path() -> PathBuf {
+        env::FNOX_CONFIG_DIR.join("config.toml")
+    }
+
+    /// Load global configuration from FNOX_CONFIG_DIR/config.toml
+    /// This is the lowest priority config, overridden by all project-level configs
+    fn load_global() -> Result<(Self, bool)> {
+        let global_config_path = Self::global_config_path();
+
+        if global_config_path.exists() {
+            tracing::debug!(
+                "Loading global config from {}",
+                global_config_path.display()
+            );
+            let config = Self::load(&global_config_path)?;
+            Ok((config, true))
+        } else {
+            Ok((Self::new(), false))
+        }
     }
 
     /// Load an imported config file
@@ -267,6 +574,42 @@ impl Config {
             merged.if_missing = overlay.if_missing;
         }
 
+        // Merge prompt_auth (overlay takes precedence)
+        if overlay.prompt_auth.is_some() {
+            merged.prompt_auth = overlay.prompt_auth;
+        }
+
+        // Merge mcp (overlay takes precedence, field-by-field to avoid
+        // silently re-enabling tools when overlay only sets exec_timeout_secs)
+        if let Some(overlay_mcp) = overlay.mcp {
+            let base_mcp = merged.mcp.get_or_insert_with(McpConfig::default);
+            if overlay_mcp.tools_explicitly_set() {
+                base_mcp.set_tools(overlay_mcp.tools());
+            }
+            if overlay_mcp.exec_timeout_secs.is_some() {
+                base_mcp.exec_timeout_secs = overlay_mcp.exec_timeout_secs;
+            }
+            if overlay_mcp.redact_output.is_some() {
+                base_mcp.redact_output = overlay_mcp.redact_output;
+            }
+            // Replace entirely — a partial overlay should not silently
+            // re-expose secrets that the base config restricted.
+            if overlay_mcp.secrets.is_some() {
+                base_mcp.secrets = overlay_mcp.secrets;
+            }
+        }
+
+        // Merge default_provider and its source (overlay takes precedence)
+        if overlay.default_provider.is_some() {
+            merged.default_provider = overlay.default_provider;
+            merged.default_provider_source = overlay.default_provider_source;
+        }
+
+        // Merge lease backends (overlay takes precedence)
+        for (name, lease) in overlay.leases {
+            merged.leases.insert(name, lease);
+        }
+
         // Merge providers (overlay takes precedence)
         for (name, provider) in overlay.providers {
             merged.providers.insert(name, provider);
@@ -291,6 +634,9 @@ impl Config {
         for (name, profile) in overlay.profiles {
             if let Some(existing_profile) = merged.profiles.get_mut(&name) {
                 // Merge existing profile
+                for (lease_name, lease) in profile.leases {
+                    existing_profile.leases.insert(lease_name, lease);
+                }
                 for (provider_name, provider) in profile.providers {
                     existing_profile.providers.insert(provider_name, provider);
                 }
@@ -307,6 +653,11 @@ impl Config {
                         .secret_sources
                         .insert(secret_name.clone(), source.clone());
                 }
+                // Merge default_provider and its source (overlay takes precedence)
+                if profile.default_provider.is_some() {
+                    existing_profile.default_provider = profile.default_provider;
+                    existing_profile.default_provider_source = profile.default_provider_source;
+                }
             } else {
                 merged.profiles.insert(name, profile);
             }
@@ -317,6 +668,7 @@ impl Config {
 
     /// Save configuration to a file
     /// Uses toml_edit to preserve insertion order from IndexMap
+    /// and format secrets as inline tables
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         // Clone and clean up empty profiles before saving
         let mut clean_config = self.clone();
@@ -324,9 +676,291 @@ impl Config {
             .profiles
             .retain(|_, profile| !profile.is_empty());
 
-        let content = toml_edit::ser::to_string_pretty(&clean_config)?;
-        fs::write(path.as_ref(), content)
-            .map_err(|e| FnoxError::Config(format!("Failed to write config file: {}", e)))?;
+        // First serialize with to_string_pretty to get proper structure
+        let pretty_string = toml_edit::ser::to_string_pretty(&clean_config)?;
+
+        // Parse it back as a document so we can modify it
+        let mut doc = pretty_string
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| FnoxError::Config(format!("Failed to parse TOML: {}", e)))?;
+
+        // Convert secrets to inline tables
+        Self::convert_secrets_to_inline(&mut doc)?;
+
+        fs::write(path.as_ref(), doc.to_string()).map_err(|source| {
+            FnoxError::ConfigWriteFailed {
+                path: path.as_ref().to_path_buf(),
+                source,
+            }
+        })?;
+        Ok(())
+    }
+
+    /// Convert all tables in [secrets] and [profiles.*.secrets] to inline tables
+    fn convert_secrets_to_inline(doc: &mut toml_edit::DocumentMut) -> Result<()> {
+        use toml_edit::{InlineTable, Item};
+
+        // Convert top-level [secrets]
+        if let Some(secrets_item) = doc.get_mut("secrets")
+            && let Some(secrets_table) = secrets_item.as_table_mut()
+        {
+            let keys: Vec<String> = secrets_table.iter().map(|(k, _)| k.to_string()).collect();
+            for key in keys {
+                if let Some(item) = secrets_table.get_mut(&key)
+                    && let Some(table) = item.as_table()
+                {
+                    let mut inline = InlineTable::new();
+                    for (k, v) in table.iter() {
+                        if let Some(value) = v.as_value() {
+                            inline.insert(k, value.clone());
+                        }
+                    }
+                    inline.fmt();
+                    *item = Item::Value(toml_edit::Value::InlineTable(inline));
+                }
+            }
+        }
+
+        // Convert [profiles.*.secrets]
+        if let Some(profiles_item) = doc.get_mut("profiles")
+            && let Some(profiles_table) = profiles_item.as_table_mut()
+        {
+            let profile_names: Vec<String> =
+                profiles_table.iter().map(|(k, _)| k.to_string()).collect();
+            for profile_name in profile_names {
+                if let Some(profile_item) = profiles_table.get_mut(&profile_name)
+                    && let Some(profile_table) = profile_item.as_table_mut()
+                    && let Some(secrets_item) = profile_table.get_mut("secrets")
+                    && let Some(secrets_table) = secrets_item.as_table_mut()
+                {
+                    let keys: Vec<String> =
+                        secrets_table.iter().map(|(k, _)| k.to_string()).collect();
+                    for key in keys {
+                        if let Some(item) = secrets_table.get_mut(&key)
+                            && let Some(table) = item.as_table()
+                        {
+                            let mut inline = InlineTable::new();
+                            for (k, v) in table.iter() {
+                                if let Some(value) = v.as_value() {
+                                    inline.insert(k, value.clone());
+                                }
+                            }
+                            inline.fmt();
+                            *item = Item::Value(toml_edit::Value::InlineTable(inline));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Save a single secret update back to its source file
+    /// Always saves to the default_target (local config file), creating a local
+    /// override if the secret exists in a parent config. This aligns with the
+    /// hierarchical config model where child configs override parent configs.
+    ///
+    /// This method preserves comments and formatting in the TOML file by
+    /// directly manipulating the document AST rather than re-serializing.
+    pub fn save_secret_to_source(
+        &self,
+        secret_name: &str,
+        secret_config: &SecretConfig,
+        profile: &str,
+        default_target: &Path,
+    ) -> Result<()> {
+        use toml_edit::{DocumentMut, Item, Value};
+
+        let target_file = default_target.to_path_buf();
+
+        // Load existing document or create new one (preserves comments)
+        let mut doc = if target_file.exists() {
+            let content =
+                fs::read_to_string(&target_file).map_err(|source| FnoxError::ConfigReadFailed {
+                    path: target_file.clone(),
+                    source,
+                })?;
+            content.parse::<DocumentMut>().map_err(|e| {
+                FnoxError::Config(format!(
+                    "Failed to parse TOML in {}: {}",
+                    target_file.display(),
+                    e
+                ))
+            })?
+        } else {
+            DocumentMut::new()
+        };
+
+        // Get or create the secrets table
+        let secrets_table = if profile == "default" {
+            if doc.get("secrets").is_none() {
+                doc["secrets"] = Item::Table(toml_edit::Table::new());
+            }
+            doc["secrets"].as_table_mut().unwrap()
+        } else {
+            if doc.get("profiles").is_none() {
+                doc["profiles"] = Item::Table(toml_edit::Table::new());
+            }
+            let profiles = doc["profiles"].as_table_mut().unwrap();
+            if profiles.get(profile).is_none() {
+                profiles[profile] = Item::Table(toml_edit::Table::new());
+            }
+            let profile_table = profiles[profile].as_table_mut().unwrap();
+            if profile_table.get("secrets").is_none() {
+                profile_table["secrets"] = Item::Table(toml_edit::Table::new());
+            }
+            profile_table["secrets"].as_table_mut().unwrap()
+        };
+
+        // Update/insert the secret as inline table
+        let inline = secret_config.to_inline_table();
+        secrets_table[secret_name] = Item::Value(Value::InlineTable(inline));
+
+        // Remove trailing space from key to match format: KEY= { ... } instead of KEY = { ... }
+        if let Some(mut key) = secrets_table.key_mut(secret_name) {
+            key.leaf_decor_mut().set_suffix("");
+        }
+
+        // Write back (preserves all comments and formatting)
+        fs::write(&target_file, doc.to_string()).map_err(|source| {
+            FnoxError::ConfigWriteFailed {
+                path: target_file,
+                source,
+            }
+        })?;
+
+        Ok(())
+    }
+
+    /// Remove a single secret from a config file, preserving comments and formatting.
+    ///
+    /// This method directly manipulates the TOML document AST rather than
+    /// re-serializing, so all comments, whitespace, and formatting are preserved.
+    pub fn remove_secret_from_source(
+        secret_name: &str,
+        profile: &str,
+        target_file: &Path,
+    ) -> Result<bool> {
+        use toml_edit::DocumentMut;
+
+        let content =
+            fs::read_to_string(target_file).map_err(|source| FnoxError::ConfigReadFailed {
+                path: target_file.to_path_buf(),
+                source,
+            })?;
+        let mut doc = content.parse::<DocumentMut>().map_err(|e| {
+            FnoxError::Config(format!(
+                "Failed to parse TOML in {}: {}",
+                target_file.display(),
+                e
+            ))
+        })?;
+
+        // Navigate to the secrets table
+        let removed = if profile == "default" {
+            doc.get_mut("secrets")
+                .and_then(|s| s.as_table_mut())
+                .map(|t| t.remove(secret_name).is_some())
+                .unwrap_or(false)
+        } else {
+            doc.get_mut("profiles")
+                .and_then(|p| p.as_table_mut())
+                .and_then(|p| p.get_mut(profile))
+                .and_then(|p| p.as_table_mut())
+                .and_then(|p| p.get_mut("secrets"))
+                .and_then(|s| s.as_table_mut())
+                .map(|t| t.remove(secret_name).is_some())
+                .unwrap_or(false)
+        };
+
+        if removed {
+            fs::write(target_file, doc.to_string()).map_err(|source| {
+                FnoxError::ConfigWriteFailed {
+                    path: target_file.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+
+        Ok(removed)
+    }
+
+    /// Save multiple secrets to a config file, preserving comments and formatting.
+    ///
+    /// This is the batch equivalent of `save_secret_to_source`, used by `fnox import`.
+    pub fn save_secrets_to_source(
+        secrets: &IndexMap<String, SecretConfig>,
+        profile: &str,
+        target_file: &Path,
+    ) -> Result<()> {
+        use toml_edit::{DocumentMut, Item, Value};
+
+        // Load existing document or create new one (preserves comments)
+        let mut doc = if target_file.exists() {
+            let content =
+                fs::read_to_string(target_file).map_err(|source| FnoxError::ConfigReadFailed {
+                    path: target_file.to_path_buf(),
+                    source,
+                })?;
+            content.parse::<DocumentMut>().map_err(|e| {
+                FnoxError::Config(format!(
+                    "Failed to parse TOML in {}: {}",
+                    target_file.display(),
+                    e
+                ))
+            })?
+        } else {
+            DocumentMut::new()
+        };
+
+        // Get or create the secrets table
+        let secrets_table = if profile == "default" {
+            if doc.get("secrets").is_none() {
+                doc["secrets"] = Item::Table(toml_edit::Table::new());
+            }
+            doc["secrets"].as_table_mut().unwrap()
+        } else {
+            if doc.get("profiles").is_none() {
+                doc["profiles"] = Item::Table(toml_edit::Table::new());
+            }
+            let profiles = doc["profiles"].as_table_mut().unwrap();
+            if profiles.get(profile).is_none() {
+                profiles[profile] = Item::Table(toml_edit::Table::new());
+            }
+            let profile_table = profiles[profile].as_table_mut().unwrap();
+            if profile_table.get("secrets").is_none() {
+                profile_table["secrets"] = Item::Table(toml_edit::Table::new());
+            }
+            profile_table["secrets"].as_table_mut().unwrap()
+        };
+
+        // Insert/update each secret as an inline table
+        for (name, config) in secrets {
+            let inline = config.to_inline_table();
+
+            // Update existing values in-place to preserve decor/comments on the entry
+            if let Some(item) = secrets_table.get_mut(name.as_str()) {
+                if let Item::Value(Value::InlineTable(existing_inline)) = item {
+                    *existing_inline = inline;
+                } else {
+                    *item = Item::Value(Value::InlineTable(inline));
+                }
+            } else {
+                secrets_table[name.as_str()] = Item::Value(Value::InlineTable(inline));
+
+                if let Some(mut key) = secrets_table.key_mut(name.as_str()) {
+                    key.leaf_decor_mut().set_suffix("");
+                }
+            }
+        }
+
+        // Write back (preserves all comments and formatting)
+        fs::write(target_file, doc.to_string()).map_err(|source| FnoxError::ConfigWriteFailed {
+            path: target_file.to_path_buf(),
+            source,
+        })?;
+
         Ok(())
     }
 
@@ -335,14 +969,19 @@ impl Config {
         Self {
             import: Vec::new(),
             root: false,
+            leases: IndexMap::new(),
             providers: IndexMap::new(),
             default_provider: None,
             secrets: IndexMap::new(),
             profiles: IndexMap::new(),
             age_key_file: None,
             if_missing: None,
+            prompt_auth: None,
+            mcp: None,
             provider_sources: HashMap::new(),
             secret_sources: HashMap::new(),
+            default_provider_source: None,
+            project_dir: None,
         }
     }
 
@@ -352,6 +991,19 @@ impl Config {
             .map(String::from)
             .or_else(|| (*env::FNOX_PROFILE).clone())
             .unwrap_or_else(|| "default".to_string())
+    }
+
+    /// Determine if we should prompt for authentication when provider auth fails.
+    /// Priority: env var > config > default (true)
+    /// Returns true only if prompting is enabled AND we're in a TTY.
+    pub fn should_prompt_auth(&self) -> bool {
+        // Check env var first
+        let enabled = (*env::FNOX_PROMPT_AUTH)
+            .or(self.prompt_auth)
+            .unwrap_or(true);
+
+        // Only prompt if enabled AND we're in a TTY
+        enabled && atty::is(atty::Stream::Stdin)
     }
 
     /// Get secrets for the default profile (mutable)
@@ -373,27 +1025,31 @@ impl Config {
 
     /// Get effective secrets (default or profile)
     /// For non-default profiles, this merges top-level secrets with profile-specific secrets,
-    /// with profile secrets taking precedence
+    /// with profile secrets taking precedence.
+    ///
+    /// Note: If a profile doesn't exist in [profiles], it's treated as "default".
+    /// This allows fnox.$FNOX_PROFILE.toml files to work without requiring a [profiles] section.
     pub fn get_secrets(&self, profile: &str) -> Result<IndexMap<String, SecretConfig>> {
         if profile == "default" {
-            Ok(self.secrets.clone())
+            return Ok(self.secrets.clone());
+        }
+
+        let mut secrets = if Settings::get().no_defaults {
+            // Profile-only mode: do not merge top-level secrets.
+            IndexMap::new()
         } else {
             // Start with top-level secrets as base
-            let mut secrets = self.secrets.clone();
+            self.secrets.clone()
+        };
 
-            // Get profile-specific secrets and merge/override
-            if let Some(profile_config) = self.profiles.get(profile) {
-                // Profile-specific secrets override top-level ones
-                secrets.extend(profile_config.secrets.clone());
-                Ok(secrets)
-            } else {
-                let available_profiles: Vec<String> = self.profiles.keys().cloned().collect();
-                Err(FnoxError::ProfileNotFound {
-                    profile: profile.to_string(),
-                    available_profiles,
-                })
-            }
+        // Get profile-specific secrets and merge/override (if profile exists)
+        if let Some(profile_config) = self.profiles.get(profile) {
+            // Profile-specific secrets override top-level ones
+            secrets.extend(profile_config.secrets.clone());
         }
+        // If profile doesn't exist in [profiles], that's OK - just use top-level secrets
+        // This allows fnox.$FNOX_PROFILE.toml to work without requiring [profiles.xxx]
+        Ok(secrets)
     }
 
     /// Get effective secrets (default or profile, mutable)
@@ -403,6 +1059,22 @@ impl Config {
         } else {
             self.get_profile_secrets_mut(profile)
         }
+    }
+
+    /// Get effective lease backends for a profile
+    pub fn get_leases(
+        &self,
+        profile: &str,
+    ) -> IndexMap<String, crate::lease_backends::LeaseBackendConfig> {
+        let mut leases = self.leases.clone();
+
+        if profile != "default"
+            && let Some(profile_config) = self.profiles.get(profile)
+        {
+            leases.extend(profile_config.leases.clone());
+        }
+
+        leases
     }
 
     /// Get effective providers for a profile
@@ -438,28 +1110,56 @@ impl Config {
         // Check for profile-specific default provider
         if profile != "default"
             && let Some(profile_config) = self.profiles.get(profile)
-            && let Some(ref default_provider) = profile_config.default_provider
+            && let Some(default_provider_name) = profile_config.default_provider()
         {
             // Validate that the default provider exists
-            if !providers.contains_key(default_provider) {
+            if !providers.contains_key(default_provider_name) {
+                // Try to get source info for better error reporting
+                if let Some(source_path) = &profile_config.default_provider_source
+                    && let (Some(src), Some(span)) = (
+                        source_registry::get_named_source(source_path),
+                        profile_config.default_provider_span(),
+                    )
+                {
+                    return Err(FnoxError::DefaultProviderNotFoundWithSource {
+                        provider: default_provider_name.to_string(),
+                        profile: profile.to_string(),
+                        src,
+                        span: span.into(),
+                    });
+                }
                 return Err(FnoxError::Config(format!(
                     "Default provider '{}' not found in profile '{}'",
-                    default_provider, profile
+                    default_provider_name, profile
                 )));
             }
-            return Ok(Some(default_provider.clone()));
+            return Ok(Some(default_provider_name.to_string()));
         }
 
         // Check for global default provider (for default profile or as fallback)
-        if let Some(ref default_provider) = self.default_provider {
+        if let Some(default_provider_name) = self.default_provider() {
             // Validate that the default provider exists
-            if !providers.contains_key(default_provider) {
+            if !providers.contains_key(default_provider_name) {
+                // Try to get source info for better error reporting
+                if let Some(source_path) = &self.default_provider_source
+                    && let (Some(src), Some(span)) = (
+                        source_registry::get_named_source(source_path),
+                        self.default_provider_span(),
+                    )
+                {
+                    return Err(FnoxError::DefaultProviderNotFoundWithSource {
+                        provider: default_provider_name.to_string(),
+                        profile: profile.to_string(),
+                        src,
+                        span: span.into(),
+                    });
+                }
                 return Err(FnoxError::Config(format!(
                     "Default provider '{}' not found in configuration",
-                    default_provider
+                    default_provider_name
                 )));
             }
-            return Ok(Some(default_provider.clone()));
+            return Ok(Some(default_provider_name.to_string()));
         }
 
         // If there's exactly one provider, auto-select it
@@ -490,10 +1190,16 @@ impl Config {
                 .insert(provider_name.clone(), path.to_path_buf());
         }
 
+        // Set source path for default_provider if set
+        if self.default_provider().is_some() {
+            self.default_provider_source = Some(path.to_path_buf());
+        }
+
         // Set source paths for named profiles
         for (_profile_name, profile) in self.profiles.iter_mut() {
             for (key, secret) in profile.secrets.iter_mut() {
                 secret.source_path = Some(path.to_path_buf());
+                secret.source_is_profile = true;
                 profile
                     .secret_sources
                     .insert(key.clone(), path.to_path_buf());
@@ -504,11 +1210,93 @@ impl Config {
                     .provider_sources
                     .insert(provider_name.clone(), path.to_path_buf());
             }
+
+            // Set source path for profile's default_provider if set
+            if profile.default_provider().is_some() {
+                profile.default_provider_source = Some(path.to_path_buf());
+            }
         }
     }
 
+    /// Check if a secret has an empty value that should be flagged as a validation issue.
+    /// Returns a ValidationIssue if the secret has an empty value and is not using plain provider.
+    fn check_empty_value(
+        &self,
+        key: &str,
+        secret: &SecretConfig,
+        profile: &str,
+    ) -> Option<crate::error::ValidationIssue> {
+        // Early return if value is not an empty string
+        let Some(value) = secret.value() else {
+            return None; // No value specified - not an issue
+        };
+        if !value.is_empty() {
+            return None; // Non-empty value - not an issue
+        }
+
+        // At this point, value is an empty string
+        // Allow empty values for plain provider (empty string is a valid secret value)
+        if self.is_plain_provider(secret.provider(), profile) {
+            return None;
+        }
+        let message = if profile == "default" {
+            format!("Secret '{}' has an empty value", key)
+        } else {
+            format!(
+                "Secret '{}' in profile '{}' has an empty value",
+                key, profile
+            )
+        };
+        Some(crate::error::ValidationIssue::with_help(
+            message,
+            "Set a value for this secret or remove it from the configuration",
+        ))
+    }
+
+    /// Check if a secret uses the plain provider (where empty values are valid).
+    /// Returns true if the provider is "plain" type.
+    fn is_plain_provider(&self, secret_provider: Option<&str>, profile: &str) -> bool {
+        // Get providers for this profile first (needed for auto-selection)
+        let providers = self.get_providers(profile);
+
+        // Determine which provider name to use
+        let provider_name = secret_provider
+            .map(String::from)
+            .or_else(|| {
+                // Try profile's default_provider first (only for non-default profiles)
+                if profile != "default" {
+                    self.profiles
+                        .get(profile)
+                        .and_then(|p| p.default_provider().map(|s| s.to_string()))
+                } else {
+                    None
+                }
+            })
+            .or_else(|| self.default_provider().map(|s| s.to_string()))
+            .or_else(|| {
+                // Auto-select if exactly one provider exists (matching get_default_provider behavior)
+                if providers.len() == 1 {
+                    providers.keys().next().cloned()
+                } else {
+                    None
+                }
+            });
+
+        let Some(provider_name) = provider_name else {
+            return false;
+        };
+
+        // Look up the provider config
+        providers
+            .get(&provider_name)
+            .is_some_and(|p| p.provider_type() == "plain")
+    }
+
     /// Validate the configuration
+    /// Collects all validation issues and returns them together using #[related]
     pub fn validate(&self) -> Result<()> {
+        use crate::error::ValidationIssue;
+
         // If root=true and no providers AND no secrets, that's OK (empty config)
         if self.root
             && self.providers.is_empty()
@@ -518,47 +1306,131 @@ impl Config {
             return Ok(());
         }
 
+        let mut issues = Vec::new();
+
+        // Check for secrets with empty values (likely a mistake, but allowed for plain provider)
+        for (key, secret) in &self.secrets {
+            if let Some(issue) = self.check_empty_value(key, secret, "default") {
+                issues.push(issue);
+            }
+        }
+
         // Check that there's at least one provider if there are any secrets
         if self.providers.is_empty() && self.profiles.is_empty() && !self.secrets.is_empty() {
-            return Err(FnoxError::Config(
-                "No providers configured. Add at least one provider to fnox.toml".to_string(),
+            issues.push(ValidationIssue::with_help(
+                "No providers configured",
+                "Add at least one provider to fnox.toml",
             ));
         }
 
         // If default_provider is set, validate it exists
-        if let Some(ref default_provider) = self.default_provider
-            && !self.providers.contains_key(default_provider)
+        if let Some(default_provider_name) = self.default_provider()
+            && !self.providers.contains_key(default_provider_name)
         {
-            return Err(FnoxError::Config(format!(
-                "Default provider '{}' not found in configuration",
-                default_provider
-            )));
+            // Try to get source info for better error reporting
+            if let Some(source_path) = &self.default_provider_source
+                && let (Some(src), Some(span)) = (
+                    source_registry::get_named_source(source_path),
+                    self.default_provider_span(),
+                )
+            {
+                return Err(FnoxError::DefaultProviderNotFoundWithSource {
+                    provider: default_provider_name.to_string(),
+                    profile: "default".to_string(),
+                    src,
+                    span: span.into(),
+                });
+            }
+            issues.push(ValidationIssue::with_help(
+                format!(
+                    "Default provider '{}' not found in configuration",
+                    default_provider_name
+                ),
+                format!(
+                    "Add [providers.{}] to your config or remove the default_provider setting",
+                    default_provider_name
+                ),
+            ));
         }
 
         // Validate each profile
         for (profile_name, profile_config) in &self.profiles {
             let providers = self.get_providers(profile_name);
 
+            // Check for profile secrets with empty values (likely a mistake, but allowed for plain provider)
+            for (key, secret) in &profile_config.secrets {
+                if let Some(issue) = self.check_empty_value(key, secret, profile_name) {
+                    issues.push(issue);
+                }
+            }
+
             // Each profile must have at least one provider (inherited or its own), unless root=true
             if providers.is_empty() && !self.root {
-                return Err(FnoxError::Config(format!(
-                    "Profile '{}' has no providers configured",
-                    profile_name
-                )));
+                issues.push(ValidationIssue::with_help(
+                    format!("Profile '{}' has no providers configured", profile_name),
+                    format!(
+                        "Add [profiles.{}.providers.<name>] or inherit from top-level providers",
+                        profile_name
+                    ),
+                ));
             }
 
             // If profile has default_provider set, validate it exists
-            if let Some(ref default_provider) = profile_config.default_provider
-                && !providers.contains_key(default_provider)
+            if let Some(default_provider_name) = profile_config.default_provider()
+                && !providers.contains_key(default_provider_name)
             {
-                return Err(FnoxError::Config(format!(
-                    "Default provider '{}' not found in profile '{}'",
-                    default_provider, profile_name
-                )));
+                // Try to get source info for better error reporting
+                if let Some(source_path) = &profile_config.default_provider_source
+                    && let (Some(src), Some(span)) = (
+                        source_registry::get_named_source(source_path),
+                        profile_config.default_provider_span(),
+                    )
+                {
+                    return Err(FnoxError::DefaultProviderNotFoundWithSource {
+                        provider: default_provider_name.to_string(),
+                        profile: profile_name.clone(),
+                        src,
+                        span: span.into(),
+                    });
+                }
+                issues.push(ValidationIssue::with_help(
+                    format!(
+                        "Default provider '{}' not found in profile '{}'",
+                        default_provider_name, profile_name
+                    ),
+                    format!(
+                        "Add [profiles.{}.providers.{}] or remove the default_provider setting",
+                        profile_name, default_provider_name
+                    ),
+                ));
             }
         }
 
-        Ok(())
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(FnoxError::ConfigValidationFailed { issues })
+        }
+    }
+
+    /// Get the default provider name, if set.
+    pub fn default_provider(&self) -> Option<&str> {
+        self.default_provider
+            .as_ref()
+            .map(|s: &SpannedValue<String>| s.value().as_str())
+    }
+
+    /// Get the default provider's source span (byte range in the config file).
+    /// Returns None if the default_provider wasn't set or was created programmatically.
+    pub fn default_provider_span(&self) -> Option<Range<usize>> {
+        self.default_provider
+            .as_ref()
+            .and_then(|s: &SpannedValue<String>| s.span())
+    }
+
+    /// Set the default provider name (without span information).
+    pub fn set_default_provider(&mut self, provider: Option<String>) {
+        self.default_provider = provider.map(SpannedValue::without_span);
     }
 }
 
@@ -577,13 +1449,91 @@ impl SecretConfig {
             default: None,
             provider: None,
             value: None,
+            env: true,
+            as_file: false,
+            json_path: None,
+            sync: None,
             source_path: None,
+            source_is_profile: false,
         }
+    }
+
+    /// Convert this secret config to a TOML inline table for saving
+    pub fn to_inline_table(&self) -> toml_edit::InlineTable {
+        let mut inline = toml_edit::InlineTable::new();
+
+        if let Some(provider) = self.provider() {
+            inline.insert("provider", toml_edit::Value::from(provider));
+        }
+        if let Some(value) = self.value() {
+            inline.insert("value", toml_edit::Value::from(value));
+        }
+        if let Some(ref json_path) = self.json_path {
+            inline.insert("json_path", toml_edit::Value::from(json_path.as_str()));
+        }
+        if let Some(ref description) = self.description {
+            inline.insert("description", toml_edit::Value::from(description.as_str()));
+        }
+        if let Some(ref default) = self.default {
+            inline.insert("default", toml_edit::Value::from(default.as_str()));
+        }
+        if let Some(if_missing) = self.if_missing {
+            let if_missing_str = match if_missing {
+                IfMissing::Error => "error",
+                IfMissing::Warn => "warn",
+                IfMissing::Ignore => "ignore",
+            };
+            inline.insert("if_missing", toml_edit::Value::from(if_missing_str));
+        }
+        if !self.env {
+            inline.insert("env", toml_edit::Value::from(false));
+        }
+        if self.as_file {
+            inline.insert("as_file", toml_edit::Value::from(true));
+        }
+        if let Some(ref sync) = self.sync {
+            let mut sync_table = toml_edit::InlineTable::new();
+            sync_table.insert("provider", toml_edit::Value::from(sync.provider.as_str()));
+            sync_table.insert("value", toml_edit::Value::from(sync.value.as_str()));
+            sync_table.fmt();
+            inline.insert("sync", toml_edit::Value::InlineTable(sync_table));
+        }
+
+        inline.fmt();
+        inline
     }
 
     /// Check if this secret has any value (provider, value, or default)
     pub fn has_value(&self) -> bool {
-        self.provider.is_some() || self.value.is_some() || self.default.is_some()
+        self.provider().is_some() || self.value().is_some() || self.default.is_some()
+    }
+
+    /// Get the provider name, if set.
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_ref().map(|s| s.value().as_str())
+    }
+
+    /// Get the provider's source span (byte range in the config file).
+    /// Returns None if the provider wasn't set or was created programmatically.
+    pub fn provider_span(&self) -> Option<Range<usize>> {
+        self.provider.as_ref().and_then(|s| s.span())
+    }
+
+    /// Set the provider name (without span information).
+    pub fn set_provider(&mut self, provider: Option<String>) {
+        self.provider = provider.map(SpannedValue::without_span);
+    }
+
+    /// Get the value, if set.
+    pub fn value(&self) -> Option<&str> {
+        self.value
+            .as_ref()
+            .map(|s: &SpannedValue<String>| s.value().as_str())
+    }
+
+    /// Set the value (without span information).
+    pub fn set_value(&mut self, value: Option<String>) {
+        self.value = value.map(SpannedValue::without_span);
     }
 }
 
@@ -591,17 +1541,37 @@ impl ProfileConfig {
     /// Create a new profile config
     pub fn new() -> Self {
         Self {
+            leases: IndexMap::new(),
             providers: IndexMap::new(),
             default_provider: None,
             secrets: IndexMap::new(),
             provider_sources: HashMap::new(),
             secret_sources: HashMap::new(),
+            default_provider_source: None,
         }
     }
 
     /// Check if the profile is effectively empty (no serializable content)
     pub fn is_empty(&self) -> bool {
-        self.providers.is_empty() && self.secrets.is_empty() && self.default_provider.is_none()
+        self.leases.is_empty()
+            && self.providers.is_empty()
+            && self.secrets.is_empty()
+            && self.default_provider().is_none()
+    }
+
+    /// Get the default provider name, if set.
+    pub fn default_provider(&self) -> Option<&str> {
+        self.default_provider
+            .as_ref()
+            .map(|s: &SpannedValue<String>| s.value().as_str())
+    }
+
+    /// Get the default provider's source span (byte range in the config file).
+    /// Returns None if the default_provider wasn't set or was created programmatically.
+    pub fn default_provider_span(&self) -> Option<Range<usize>> {
+        self.default_provider
+            .as_ref()
+            .and_then(|s: &SpannedValue<String>| s.span())
     }
 }
 
@@ -621,9 +1591,18 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn test_empty_import_not_serialized() {
@@ -666,11 +1645,12 @@ mod tests {
 
         // Add a provider and secret to the prod profile
         let mut prod_profile = ProfileConfig::new();
-        prod_profile
-            .providers
-            .insert("plain".to_string(), ProviderConfig::Plain);
+        prod_profile.providers.insert(
+            "plain".to_string(),
+            ProviderConfig::Plain { auth_command: None },
+        );
         let mut secret = SecretConfig::new();
-        secret.value = Some("test-value".to_string());
+        secret.set_value(Some("test-value".to_string()));
         prod_profile
             .secrets
             .insert("TEST_SECRET".to_string(), secret);
@@ -692,6 +1672,30 @@ mod tests {
         assert!(
             !toml.contains("[profiles]\n"),
             "Should not have standalone [profiles] header"
+        );
+    }
+
+    #[test]
+    fn test_local_override_filename_matches_standard_config_names() {
+        assert_eq!(
+            local_override_filename(Path::new("nested/fnox.toml")),
+            Some("fnox.local.toml")
+        );
+        assert_eq!(
+            local_override_filename(Path::new("nested/.fnox.toml")),
+            Some(".fnox.local.toml")
+        );
+    }
+
+    #[test]
+    fn test_local_override_filename_rejects_non_standard_config_names() {
+        assert_eq!(
+            local_override_filename(Path::new("nested/custom.toml")),
+            None
+        );
+        assert_eq!(
+            local_override_filename(Path::new("nested/fnox.dev.toml")),
+            None
         );
     }
 
@@ -728,5 +1732,241 @@ mod tests {
             !toml.contains("prod"),
             "Empty profile name should not appear"
         );
+    }
+
+    #[test]
+    fn test_no_defaults_profile_only_secrets() {
+        crate::settings::Settings::reset_for_tests();
+        crate::settings::Settings::set_cli_snapshot(crate::settings::CliSnapshot {
+            age_key_file: None,
+            profile: Some("prod".to_string()),
+            if_missing: None,
+            no_defaults: true,
+        });
+
+        let mut config = Config::new();
+        config
+            .secrets
+            .insert("DEFAULT_ONLY".to_string(), SecretConfig::new());
+
+        let mut prod_profile = ProfileConfig::new();
+        prod_profile
+            .secrets
+            .insert("PROD_ONLY".to_string(), SecretConfig::new());
+        config.profiles.insert("prod".to_string(), prod_profile);
+
+        let secrets = config.get_secrets("prod").unwrap();
+        assert!(secrets.contains_key("PROD_ONLY"));
+        assert!(!secrets.contains_key("DEFAULT_ONLY"));
+    }
+
+    #[test]
+    fn test_no_defaults_profile_without_section_is_empty() {
+        crate::settings::Settings::reset_for_tests();
+        crate::settings::Settings::set_cli_snapshot(crate::settings::CliSnapshot {
+            age_key_file: None,
+            profile: Some("prod".to_string()),
+            if_missing: None,
+            no_defaults: true,
+        });
+
+        let mut config = Config::new();
+        config
+            .secrets
+            .insert("DEFAULT_ONLY".to_string(), SecretConfig::new());
+
+        let secrets = config.get_secrets("prod").unwrap();
+        assert!(secrets.is_empty());
+    }
+
+    #[test]
+    fn test_find_local_config_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = super::find_local_config(dir.path(), None);
+        assert_eq!(result, dir.path().join("fnox.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_only_fnox_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fnox.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), None);
+        assert_eq!(result, dir.path().join("fnox.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_only_local_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fnox.local.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), None);
+        assert_eq!(result, dir.path().join("fnox.local.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_both_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fnox.toml"), "").unwrap();
+        std::fs::write(dir.path().join("fnox.local.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), None);
+        // Should pick fnox.toml (lowest priority)
+        assert_eq!(result, dir.path().join("fnox.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_only_dotfile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".fnox.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), None);
+        assert_eq!(result, dir.path().join(".fnox.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fnox.staging.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), Some("staging"));
+        assert_eq!(result, dir.path().join("fnox.staging.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_profile_with_base() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fnox.toml"), "").unwrap();
+        std::fs::write(dir.path().join("fnox.staging.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), Some("staging"));
+        // Profile-specific file is preferred when profile is active
+        assert_eq!(result, dir.path().join("fnox.staging.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_default_profile_with_base() {
+        // Default profile should still pick fnox.toml (lowest priority)
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fnox.toml"), "").unwrap();
+        std::fs::write(dir.path().join("fnox.local.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), Some("default"));
+        assert_eq!(result, dir.path().join("fnox.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_profile_only_base_exists() {
+        // Profile specified but only base config exists — fall back to it
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fnox.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), Some("staging"));
+        assert_eq!(result, dir.path().join("fnox.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_profile_skips_local_file() {
+        // When a profile is active and only fnox.local.toml exists,
+        // should NOT write there — fall through to creating fnox.toml
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fnox.local.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), Some("staging"));
+        assert_eq!(result, dir.path().join("fnox.toml"));
+    }
+
+    #[test]
+    fn test_find_local_config_no_profile_uses_local_file() {
+        // Without a profile, fnox.local.toml is a valid write target
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fnox.local.toml"), "").unwrap();
+        let result = super::find_local_config(dir.path(), None);
+        assert_eq!(result, dir.path().join("fnox.local.toml"));
+    }
+
+    #[test]
+    fn filter_secrets_none_allowlist_returns_all() {
+        let cfg = McpConfig::default(); // secrets: None
+        let mut m = IndexMap::new();
+        m.insert("A".to_string(), SecretConfig::new());
+        m.insert("B".to_string(), SecretConfig::new());
+        let result = cfg.filter_secrets(m.clone());
+        assert_eq!(
+            result.keys().collect::<Vec<_>>(),
+            m.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn filter_secrets_empty_allowlist_returns_empty() {
+        let cfg = McpConfig {
+            secrets: Some(vec![]),
+            ..Default::default()
+        };
+        let mut m = IndexMap::new();
+        m.insert("A".to_string(), SecretConfig::new());
+        assert!(cfg.filter_secrets(m).is_empty());
+    }
+
+    #[test]
+    fn filter_secrets_subset() {
+        let cfg = McpConfig {
+            secrets: Some(vec!["A".into()]),
+            ..Default::default()
+        };
+        let mut m = IndexMap::new();
+        m.insert("A".to_string(), SecretConfig::new());
+        m.insert("B".to_string(), SecretConfig::new());
+        let result = cfg.filter_secrets(m);
+        assert!(result.contains_key("A"));
+        assert!(!result.contains_key("B"));
+    }
+
+    #[test]
+    fn filter_secrets_unknown_allowlist_entry_ignored() {
+        let cfg = McpConfig {
+            secrets: Some(vec!["A".into(), "NONEXISTENT".into()]),
+            ..Default::default()
+        };
+        let mut m = IndexMap::new();
+        m.insert("A".to_string(), SecretConfig::new());
+        let result = cfg.filter_secrets(m);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("A"));
+    }
+
+    #[test]
+    fn mcp_secrets_overlay_replaces_base_not_appends() {
+        let base = Config {
+            mcp: Some(McpConfig {
+                secrets: Some(vec!["A".into()]),
+                ..Default::default()
+            }),
+            ..Config::new()
+        };
+        let overlay = Config {
+            mcp: Some(McpConfig {
+                secrets: Some(vec!["B".into()]),
+                ..Default::default()
+            }),
+            ..Config::new()
+        };
+        let merged = Config::merge_configs(base, overlay).unwrap();
+        assert_eq!(
+            merged.mcp.unwrap().secrets,
+            Some(vec!["B".into()]),
+            "overlay must replace, not append, the base allowlist"
+        );
+    }
+
+    #[test]
+    fn mcp_secrets_overlay_without_secrets_preserves_base() {
+        let base = Config {
+            mcp: Some(McpConfig {
+                secrets: Some(vec!["A".into()]),
+                ..Default::default()
+            }),
+            ..Config::new()
+        };
+        let overlay = Config {
+            mcp: Some(McpConfig {
+                ..Default::default()
+            }),
+            ..Config::new()
+        };
+        let merged = Config::merge_configs(base, overlay).unwrap();
+        assert_eq!(merged.mcp.unwrap().secrets, Some(vec!["A".into()]));
     }
 }

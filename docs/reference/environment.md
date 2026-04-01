@@ -23,6 +23,15 @@ fnox get DATABASE_URL
 fnox exec -- ./deploy.sh
 ```
 
+### `FNOX_NO_DEFAULTS`
+
+When set to `true`, do not merge top-level secrets into the selected profile.
+
+```bash
+export FNOX_NO_DEFAULTS=true
+fnox exec --profile production -- ./deploy.sh
+```
+
 ### `FNOX_CONFIG_DIR`
 
 Configuration directory path.
@@ -236,11 +245,11 @@ Used by Bitwarden provider.
 ### HashiCorp Vault
 
 ```bash
-export VAULT_ADDR="https://vault.example.com:8200"
-export VAULT_TOKEN="hvs.CAESIJ..."
+export VAULT_ADDR="https://vault.example.com:8200"   # Or FNOX_VAULT_ADDR
+export VAULT_TOKEN="hvs.CAESIJ..."                # Or FNOX_VAULT_TOKEN
 ```
 
-Used by Vault provider.
+Used by Vault provider. `FNOX_` prefixed variables take precedence over standard Vault environment variables.
 
 ## Editor
 

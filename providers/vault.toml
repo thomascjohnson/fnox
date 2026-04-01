@@ -1,0 +1,36 @@
+# HashiCorp Vault provider - remote secrets storage
+display_name = "HashiCorp Vault"
+serde_rename = "vault"
+rust_variant = "HashiCorpVault"
+category = "CloudSecretsManager"
+description = "HashiCorp Vault secrets engine"
+default_name = "vault"
+auth_command = "vault login"
+setup_instructions = """
+Requires HashiCorp Vault server and token.
+Set: export VAULT_ADDR=http://localhost:8200
+Set: export VAULT_TOKEN=<token>"""
+
+[fields.address]
+type = "optional"
+placeholder = "http://localhost:8200"
+label = "Vault address:"
+wizard = true
+
+[fields.path]
+type = "optional"
+placeholder = "secret"
+label = "Secrets path (optional):"
+wizard = true
+
+[fields.token]
+type = "optional"
+placeholder = ""
+label = "Token (optional, uses env var if not set):"
+wizard = true
+
+[fields.namespace]
+type = "optional"
+placeholder = ""
+label = "Namespace (optional, uses env var if not set):"
+wizard = true

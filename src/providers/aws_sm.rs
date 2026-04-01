@@ -3,7 +3,121 @@ use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_secretsmanager::Client;
 use std::collections::HashMap;
-use std::path::Path;
+
+pub fn env_dependencies() -> &'static [&'static str] {
+    &[]
+}
+
+/// Convert AWS SDK errors to structured FnoxError with appropriate hints
+fn aws_error_to_fnox<E, R>(
+    err: &aws_sdk_secretsmanager::error::SdkError<E, R>,
+    secret_name: &str,
+) -> FnoxError
+where
+    E: std::fmt::Debug + std::fmt::Display,
+    R: std::fmt::Debug,
+{
+    use aws_sdk_secretsmanager::error::SdkError;
+
+    const URL: &str = "https://fnox.jdx.dev/providers/aws-sm";
+
+    match err {
+        SdkError::ServiceError(service_err) => {
+            let err_str = service_err.err().to_string();
+            if err_str.contains("ResourceNotFoundException") {
+                FnoxError::ProviderSecretNotFound {
+                    provider: "AWS Secrets Manager".to_string(),
+                    secret: secret_name.to_string(),
+                    hint: "Check that the secret exists in AWS Secrets Manager".to_string(),
+                    url: URL.to_string(),
+                }
+            } else if err_str.contains("AccessDenied") || err_str.contains("UnauthorizedAccess") {
+                FnoxError::ProviderAuthFailed {
+                    provider: "AWS Secrets Manager".to_string(),
+                    details: err_str,
+                    hint: "Check IAM permissions for secretsmanager:GetSecretValue".to_string(),
+                    url: URL.to_string(),
+                }
+            } else {
+                FnoxError::ProviderApiError {
+                    provider: "AWS Secrets Manager".to_string(),
+                    details: err_str,
+                    hint: "Check AWS Secrets Manager configuration".to_string(),
+                    url: URL.to_string(),
+                }
+            }
+        }
+        SdkError::TimeoutError(_) => FnoxError::ProviderApiError {
+            provider: "AWS Secrets Manager".to_string(),
+            details: "Request timed out".to_string(),
+            hint: "Check network connectivity and AWS region endpoint".to_string(),
+            url: URL.to_string(),
+        },
+        SdkError::DispatchFailure(dispatch_err) => {
+            if let Some(connector_err) = dispatch_err.as_connector_error() {
+                let mut error_chain = vec![connector_err.to_string()];
+                let mut source = std::error::Error::source(connector_err);
+                while let Some(err) = source {
+                    error_chain.push(err.to_string());
+                    source = std::error::Error::source(err);
+                }
+                let full_error = error_chain.join(": ");
+
+                let hint = if full_error.contains("dns error")
+                    || full_error.contains("failed to lookup address")
+                {
+                    "DNS resolution failed - check network and AWS region"
+                } else if full_error.contains("connection refused") {
+                    "Connection refused - check AWS endpoint accessibility"
+                } else if full_error.contains("tls")
+                    || full_error.contains("ssl")
+                    || full_error.contains("certificate")
+                {
+                    "TLS/SSL error - check certificates or proxy config"
+                } else if full_error.contains("timeout") {
+                    "Connection timeout - check network and firewall"
+                } else if full_error.contains("No credentials")
+                    || full_error.contains("Unable to load credentials")
+                    || full_error.contains("expired")
+                {
+                    "Configure AWS credentials: run 'aws configure', 'aws sso login', or set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY"
+                } else {
+                    "Check network connectivity"
+                };
+
+                // Use ProviderAuthFailed for credential-related errors
+                if full_error.contains("credentials") || full_error.contains("expired") {
+                    FnoxError::ProviderAuthFailed {
+                        provider: "AWS Secrets Manager".to_string(),
+                        details: full_error,
+                        hint: hint.to_string(),
+                        url: URL.to_string(),
+                    }
+                } else {
+                    FnoxError::ProviderApiError {
+                        provider: "AWS Secrets Manager".to_string(),
+                        details: full_error,
+                        hint: hint.to_string(),
+                        url: URL.to_string(),
+                    }
+                }
+            } else {
+                FnoxError::ProviderApiError {
+                    provider: "AWS Secrets Manager".to_string(),
+                    details: format!("{:?}", dispatch_err),
+                    hint: "Check network connectivity".to_string(),
+                    url: URL.to_string(),
+                }
+            }
+        }
+        _ => FnoxError::ProviderApiError {
+            provider: "AWS Secrets Manager".to_string(),
+            details: err.to_string(),
+            hint: "Check AWS configuration".to_string(),
+            url: URL.to_string(),
+        },
+    }
+}
 
 /// Extract the secret name from an AWS Secrets Manager ARN.
 /// ARN format: arn:aws:secretsmanager:region:account:secret:name-SUFFIX
@@ -33,12 +147,24 @@ fn extract_name_from_arn(arn_or_name: &str) -> String {
 
 pub struct AwsSecretsManagerProvider {
     region: String,
+    profile: Option<String>,
     prefix: Option<String>,
+    endpoint: Option<String>,
 }
 
 impl AwsSecretsManagerProvider {
-    pub fn new(region: String, prefix: Option<String>) -> Self {
-        Self { region, prefix }
+    pub fn new(
+        region: String,
+        profile: Option<String>,
+        prefix: Option<String>,
+        endpoint: Option<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            region,
+            profile,
+            prefix,
+            endpoint,
+        })
     }
 
     pub fn get_secret_name(&self, key: &str) -> String {
@@ -50,15 +176,22 @@ impl AwsSecretsManagerProvider {
 
     /// Create an AWS Secrets Manager client
     async fn create_client(&self) -> Result<Client> {
-        // Load AWS config with the specified region
-        let config = aws_config::defaults(BehaviorVersion::latest())
-            .region(aws_sdk_secretsmanager::config::Region::new(
-                self.region.clone(),
-            ))
-            .load()
-            .await;
+        let mut builder = aws_config::defaults(BehaviorVersion::latest()).region(
+            aws_sdk_secretsmanager::config::Region::new(self.region.clone()),
+        );
 
-        Ok(Client::new(&config))
+        if let Some(profile) = &self.profile {
+            builder = builder.profile_name(profile);
+        }
+
+        let config = builder.load().await;
+
+        let mut sm_config_builder = aws_sdk_secretsmanager::config::Builder::from(&config);
+        if let Some(endpoint) = &self.endpoint {
+            sm_config_builder = sm_config_builder.endpoint_url(endpoint);
+        }
+
+        Ok(Client::from_conf(sm_config_builder.build()))
     }
 
     /// Get a secret value from AWS Secrets Manager
@@ -70,21 +203,16 @@ impl AwsSecretsManagerProvider {
             .secret_id(secret_name)
             .send()
             .await
-            .map_err(|e| {
-                FnoxError::Provider(format!(
-                    "Failed to get secret '{}' from AWS Secrets Manager: {}",
-                    secret_name, e
-                ))
-            })?;
+            .map_err(|e| aws_error_to_fnox(&e, secret_name))?;
 
         // Get the secret string (not binary)
         result
             .secret_string()
-            .ok_or_else(|| {
-                FnoxError::Provider(format!(
-                    "Secret '{}' has no string value (binary secrets not supported)",
-                    secret_name
-                ))
+            .ok_or_else(|| FnoxError::ProviderInvalidResponse {
+                provider: "AWS Secrets Manager".to_string(),
+                details: format!("Secret '{}' has no string value", secret_name),
+                hint: "Binary secrets are not supported".to_string(),
+                url: "https://fnox.jdx.dev/providers/aws-sm".to_string(),
             })
             .map(|s| s.to_string())
     }
@@ -114,19 +242,11 @@ impl AwsSecretsManagerProvider {
                         .secret_string(secret_value)
                         .send()
                         .await
-                        .map_err(|e| {
-                            FnoxError::Provider(format!(
-                                "Failed to create secret '{}' in AWS Secrets Manager: {}",
-                                secret_name, e
-                            ))
-                        })?;
+                        .map_err(|e| aws_error_to_fnox(&e, secret_name))?;
                     tracing::debug!("Created secret '{}' in AWS Secrets Manager", secret_name);
                     Ok(())
                 } else {
-                    Err(FnoxError::Provider(format!(
-                        "Failed to update secret '{}' in AWS Secrets Manager: {}",
-                        secret_name, e
-                    )))
+                    Err(aws_error_to_fnox(&e, secret_name))
                 }
             }
         }
@@ -139,7 +259,7 @@ impl crate::providers::Provider for AwsSecretsManagerProvider {
         vec![crate::providers::ProviderCapability::RemoteStorage]
     }
 
-    async fn get_secret(&self, value: &str, _key_file: Option<&Path>) -> Result<String> {
+    async fn get_secret(&self, value: &str) -> Result<String> {
         let secret_name = self.get_secret_name(value);
         tracing::debug!(
             "Getting secret '{}' from AWS Secrets Manager in region '{}'",
@@ -153,7 +273,6 @@ impl crate::providers::Provider for AwsSecretsManagerProvider {
     async fn get_secrets_batch(
         &self,
         secrets: &[(String, String)],
-        _key_file: Option<&Path>,
     ) -> HashMap<String, Result<String>> {
         tracing::debug!(
             "Getting {} secrets from AWS Secrets Manager using batch API",
@@ -170,26 +289,36 @@ impl crate::providers::Provider for AwsSecretsManagerProvider {
             Ok(c) => c,
             Err(e) => {
                 // If we can't create client, return errors for all secrets
-                let error_msg = format!("Failed to create AWS client: {}", e);
                 for (key, _) in secrets {
-                    results.insert(key.clone(), Err(FnoxError::Provider(error_msg.clone())));
+                    results.insert(
+                        key.clone(),
+                        Err(FnoxError::ProviderAuthFailed {
+                            provider: "AWS Secrets Manager".to_string(),
+                            details: e.to_string(),
+                            hint: "Run 'aws sso login' or check AWS credentials".to_string(),
+                            url: "https://fnox.jdx.dev/providers/aws-sm".to_string(),
+                        }),
+                    );
                 }
                 return results;
             }
         };
 
         for chunk in secrets.chunks(BATCH_SIZE) {
-            // Build mapping from secret ID to original key
-            // This allows exact matching without false positives
-            let mut secret_id_to_key: HashMap<String, String> = HashMap::new();
-            let secret_ids: Vec<String> = chunk
-                .iter()
-                .map(|(key, value)| {
-                    let secret_id = self.get_secret_name(value);
-                    secret_id_to_key.insert(secret_id.clone(), key.clone());
-                    secret_id
-                })
-                .collect();
+            // Build mapping from secret ID to original keys (multiple keys can share same secret)
+            let mut secret_id_to_keys: HashMap<String, Vec<String>> = HashMap::new();
+            let mut secret_ids: Vec<String> = Vec::new();
+            for (key, value) in chunk {
+                let secret_id = self.get_secret_name(value);
+                secret_id_to_keys
+                    .entry(secret_id.clone())
+                    .or_default()
+                    .push(key.clone());
+                // Only add unique secret IDs to the request
+                if !secret_ids.contains(&secret_id) {
+                    secret_ids.push(secret_id);
+                }
+            }
 
             tracing::debug!(
                 "Fetching batch of {} secrets from AWS Secrets Manager",
@@ -219,18 +348,26 @@ impl crate::providers::Provider for AwsSecretsManagerProvider {
                             continue;
                         };
 
-                        // Find the matching key using exact name match
-                        if let Some(key) = secret_id_to_key.get(&secret_name) {
-                            if let Some(secret_string) = secret.secret_string() {
-                                results.insert(key.clone(), Ok(secret_string.to_string()));
-                            } else {
-                                results.insert(
-                                    key.clone(),
-                                    Err(FnoxError::Provider(format!(
-                                        "Secret '{}' has no string value (binary secrets not supported)",
-                                        secret_name
-                                    ))),
-                                );
+                        // Find all matching keys using exact name match
+                        if let Some(keys) = secret_id_to_keys.get(&secret_name) {
+                            for key in keys {
+                                if let Some(secret_string) = secret.secret_string() {
+                                    results.insert(key.clone(), Ok(secret_string.to_string()));
+                                } else {
+                                    results.insert(
+                                        key.clone(),
+                                        Err(FnoxError::ProviderInvalidResponse {
+                                            provider: "AWS Secrets Manager".to_string(),
+                                            details: format!(
+                                                "Secret '{}' has no string value",
+                                                secret_name
+                                            ),
+                                            hint: "Binary secrets are not supported".to_string(),
+                                            url: "https://fnox.jdx.dev/providers/aws-sm"
+                                                .to_string(),
+                                        }),
+                                    );
+                                }
                             }
                         } else {
                             tracing::warn!(
@@ -244,45 +381,60 @@ impl crate::providers::Provider for AwsSecretsManagerProvider {
                     for error in response.errors() {
                         if let Some(error_secret_id) = error.secret_id() {
                             // Try exact match first, then check if it's an ARN
-                            let lookup_name = if secret_id_to_key.contains_key(error_secret_id) {
+                            let lookup_name = if secret_id_to_keys.contains_key(error_secret_id) {
                                 error_secret_id.to_string()
                             } else {
                                 // Might be an ARN in the error response
                                 extract_name_from_arn(error_secret_id)
                             };
 
-                            if let Some(key) = secret_id_to_key.get(&lookup_name) {
+                            if let Some(keys) = secret_id_to_keys.get(&lookup_name) {
                                 let error_msg =
                                     error.message().unwrap_or("Unknown error").to_string();
-                                results.insert(
-                                    key.clone(),
-                                    Err(FnoxError::Provider(format!(
-                                        "Failed to get secret '{}': {}",
-                                        lookup_name, error_msg
-                                    ))),
-                                );
+                                for key in keys {
+                                    results.insert(
+                                        key.clone(),
+                                        Err(FnoxError::ProviderApiError {
+                                            provider: "AWS Secrets Manager".to_string(),
+                                            details: format!(
+                                                "Failed to get '{}': {}",
+                                                lookup_name, error_msg
+                                            ),
+                                            hint:
+                                                "Check that the secret exists and you have access"
+                                                    .to_string(),
+                                            url: "https://fnox.jdx.dev/providers/aws-sm"
+                                                .to_string(),
+                                        }),
+                                    );
+                                }
                             }
                         }
                     }
 
                     // Check for any secrets that weren't in response (neither success nor error)
-                    for (secret_id, key) in &secret_id_to_key {
-                        if !results.contains_key(key) {
-                            results.insert(
-                                key.clone(),
-                                Err(FnoxError::Provider(format!(
-                                    "Secret '{}' not found in batch response",
-                                    secret_id
-                                ))),
-                            );
+                    for (secret_id, keys) in &secret_id_to_keys {
+                        for key in keys {
+                            if !results.contains_key(key) {
+                                results.insert(
+                                    key.clone(),
+                                    Err(FnoxError::ProviderSecretNotFound {
+                                        provider: "AWS Secrets Manager".to_string(),
+                                        secret: secret_id.clone(),
+                                        hint: "Check that the secret exists".to_string(),
+                                        url: "https://fnox.jdx.dev/providers/aws-sm".to_string(),
+                                    }),
+                                );
+                            }
                         }
                     }
                 }
                 Err(e) => {
                     // Batch call failed entirely, return errors for all secrets in this chunk
-                    let error_msg = format!("AWS Secrets Manager batch call failed: {}", e);
-                    for key in secret_id_to_key.values() {
-                        results.insert(key.clone(), Err(FnoxError::Provider(error_msg.clone())));
+                    for (secret_id, keys) in &secret_id_to_keys {
+                        for key in keys {
+                            results.insert(key.clone(), Err(aws_error_to_fnox(&e, secret_id)));
+                        }
                     }
                 }
             }
@@ -300,13 +452,15 @@ impl crate::providers::Provider for AwsSecretsManagerProvider {
             .max_results(1)
             .send()
             .await
-            .map_err(|e| {
-                FnoxError::Provider(format!(
-                    "Failed to connect to AWS Secrets Manager in region '{}': {}",
-                    self.region, e
-                ))
-            })?;
+            .map_err(|e| aws_error_to_fnox(&e, "connection-test"))?;
 
         Ok(())
+    }
+
+    async fn put_secret(&self, key: &str, value: &str) -> Result<String> {
+        let secret_name = self.get_secret_name(key);
+        self.put_secret(&secret_name, value).await?;
+        // Return the key name (without prefix) to store in config
+        Ok(key.to_string())
     }
 }

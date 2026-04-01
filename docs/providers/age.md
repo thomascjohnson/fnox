@@ -14,9 +14,8 @@ grep "public key:" ~/.config/fnox/age.txt
 
 # 3. Configure fnox
 cat >> fnox.toml << 'EOF'
-[providers.age]
-type = "age"
-recipients = ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"]
+[providers]
+age = { type = "age", recipients = ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"] }
 EOF
 
 # 4. Set private key
@@ -77,17 +76,15 @@ Age has first-class SSH key support! Use your existing SSH keys:
 Add age provider to `fnox.toml`:
 
 ```toml
-[providers.age]
-type = "age"
-recipients = ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"]
+[providers]
+age = { type = "age", recipients = ["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"] }
 ```
 
 Or with SSH key:
 
 ```toml
-[providers.age]
-type = "age"
-recipients = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQs8..."]
+[providers]
+age = { type = "age", recipients = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQs8..."] }
 ```
 
 ### Set Decryption Key
@@ -123,9 +120,8 @@ fnox set DATABASE_URL "postgresql://localhost/mydb" --provider age
 The resulting `fnox.toml`:
 
 ```toml
-[secrets.DATABASE_URL]
-provider = "age"
-value = "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdC..."  # ← Encrypted, safe to commit!
+[secrets]
+DATABASE_URL = { provider = "age", value = "YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IHNjcnlwdC..." }  # ← Encrypted, safe to commit!
 ```
 
 ### Decrypt and Get a Secret
@@ -201,9 +197,9 @@ cat ~/.ssh/id_ed25519.pub
 [providers.age]
 type = "age"
 recipients = [
-  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQs... # alice",
-  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBws... # bob",
-  "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2el... # ci-bot"
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQs...",  # alice
+  "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBws...",  # bob
+  "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2el..."   # ci-bot
 ]
 ```
 
@@ -257,19 +253,30 @@ fnox get DATABASE_URL  # Works for all recipients!
    [providers.age]
    type = "age"
    recipients = [
-     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQs... # alice",
-     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBws... # bob",
-     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIXyz... # charlie (NEW)"
+     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGQs...",  # alice
+     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBws...",  # bob
+     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIXyz..."   # charlie (NEW)
    ]
    ```
 
 3. **Re-encrypt all secrets** (necessary for new recipient):
 
    ```bash
-   # Re-encrypt each secret with new recipient list
-   fnox set DATABASE_URL "$(fnox get DATABASE_URL)" --provider age
-   fnox set API_KEY "$(fnox get API_KEY)" --provider age
-   # ... repeat for all secrets
+   fnox reencrypt -p age
+   ```
+
+   Use `--dry-run` to preview what would be re-encrypted:
+
+   ```bash
+   fnox reencrypt -p age --dry-run
+   ```
+
+   For multiple profiles:
+
+   ```bash
+   fnox reencrypt -p age -P default -f
+   fnox reencrypt -p age -P staging -f
+   fnox reencrypt -p age -P prod -f
    ```
 
 4. **Commit and push**:
@@ -281,6 +288,7 @@ fnox get DATABASE_URL  # Works for all recipients!
    ```
 
 5. **New member pulls and decrypts**:
+
    ```bash
    git pull
    export FNOX_AGE_KEY_FILE=~/.ssh/id_ed25519
@@ -348,15 +356,6 @@ jobs:
 - ❌ No centralized access control
 - ❌ Manual key management
 - ❌ Adding new team members requires re-encryption
-
-## Best Practices
-
-1. **Use SSH keys when possible** - Leverage keys you already have
-2. **Add all team members as recipients** - Everyone can decrypt
-3. **Include a CI bot key** - For GitHub Actions/CI pipelines
-4. **Keep private keys secure** - Never commit `FNOX_AGE_KEY` or private keys
-5. **Rotate keys periodically** - Generate new keys and re-encrypt secrets
-6. **Use different keys for different environments** - Separate dev, staging, prod
 
 ## Troubleshooting
 

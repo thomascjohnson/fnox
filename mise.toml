@@ -5,6 +5,7 @@ _.path = ["target/debug", "test/bats/bin"]
 age = "latest"
 "cargo:cargo-msrv" = "latest"
 cargo-binstall = "latest"
+communique = "latest"
 "cargo:cargo-edit" = "latest"
 git-cliff = "latest"
 hk = "latest"
@@ -15,7 +16,9 @@ shfmt = "latest"
 actionlint = "latest"
 1password = "latest"
 bitwarden = "latest"
+bitwarden-secrets-manager = "latest"
 vault = "latest"
+infisical = "latest"
 usage = "latest"
 
 [tasks.test]
@@ -28,14 +31,23 @@ run = "cargo test"
 
 [tasks."test:bats"]
 description = "Run bats tests only"
-depends = ["build"]
-run = "fnox exec -- bats --jobs 4 --no-parallelize-within-files {{arg(name='test', var=true, default='test')}}"
+run = '''
+filter_tags=""
+if [ -n "$BATS_FILTER_TAGS" ]; then
+  filter_tags="--filter-tags $BATS_FILTER_TAGS"
+fi
+if [ -n "$TRANCHE" ] && [ -n "$TRANCHE_COUNT" ]; then
+  tests=$(ls -1 test/*.bats | sort | awk -v t=$TRANCHE -v n=$TRANCHE_COUNT 'NR % n == t')
+  fnox exec -- bats --jobs 16 $filter_tags $tests
+else
+  fnox exec -- bats --jobs 16 $filter_tags {{arg(name='test', var=true, default='test')}}
+fi
+'''
 
 [tasks."test:bats:fork"]
 description = "Run bats tests simulating forked PR (no age key access)"
-depends = ["build"]
 env = { FNOX_AGE_KEY = "/tmp/nonexistent-age-key.txt" }
-run = "fnox exec -- bats --jobs 4 --no-parallelize-within-files {{arg(name='test', var=true, default='test')}}"
+run = "fnox exec -- bats --jobs 16 {{arg(name='test', var=true, default='test')}}"
 
 [tasks.cargo-test]
 description = "Run cargo tests only"
@@ -58,6 +70,15 @@ depends = ["build", "test", "lint"]
 [tasks.render]
 description = "Render documentation from usage"
 depends = ["render:*"]
+
+[tasks."render:schema"]
+description = "Generate JSON Schema for fnox configuration"
+depends = ["build"]
+run = [
+  "fnox schema > docs/public/schema.json",
+  "prettier --write docs/public/schema.json",
+  "git add docs/public/schema.json",
+]
 
 [tasks."render:usage"]
 description = "Generate CLI documentation from usage"

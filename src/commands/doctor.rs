@@ -2,7 +2,7 @@ use crate::commands::Cli;
 use crate::config::Config;
 use crate::env;
 use crate::error::Result;
-use crate::providers::get_provider;
+use crate::providers::get_provider_resolved;
 use clap::Args;
 
 #[derive(Debug, Args)]
@@ -40,7 +40,7 @@ impl DoctorCommand {
                         if secret.has_value() {
                             with_values += 1;
                         }
-                        if secret.provider.is_some() {
+                        if secret.provider().is_some() {
                             with_providers += 1;
                         }
                         if secret.if_missing == Some(crate::config::IfMissing::Error) {
@@ -56,7 +56,7 @@ impl DoctorCommand {
                         println!("  Secrets:");
                         for (name, secret) in secrets {
                             let status = if secret.has_value() { "✓" } else { "?" };
-                            let provider = secret.provider.as_deref().unwrap_or("plain");
+                            let provider = secret.provider().unwrap_or("plain");
                             println!("    {} {} (provider: {})", status, name, provider);
                         }
                     }
@@ -94,7 +94,7 @@ impl DoctorCommand {
             println!();
             println!("🔍 Provider Health:");
             for (name, provider_config) in &providers {
-                match get_provider(provider_config) {
+                match get_provider_resolved(&config, &profile, name, provider_config).await {
                     Ok(provider) => {
                         print!("  {}: Testing...", name);
                         match provider.test_connection().await {

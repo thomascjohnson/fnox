@@ -44,6 +44,16 @@ teardown() {
 	assert_output --partial "function __fnox_cd_hook --on-variable PWD"
 }
 
+@test "fnox activate nu generates valid nushell code" {
+	run "$FNOX_BIN" activate nu
+
+	assert_success
+	assert_output --partial '$env.FNOX_SHELL = "nu"'
+	assert_output --partial "def --env --wrapped fnox"
+	assert_output --partial "def --env _fnox_hook"
+	assert_output --partial "hooks.pre_prompt"
+}
+
 @test "fnox activate --no-hook-env skips hook setup" {
 	run "$FNOX_BIN" activate bash --no-hook-env
 
@@ -84,6 +94,26 @@ teardown() {
 	assert_output --partial '__FNOX_SESSION='
 }
 
+@test "fnox hook-env with nushell outputs JSON format" {
+	cd "$TEST_TEMP_DIR"
+	cat >fnox.toml <<-EOF
+		[providers.plain]
+		type = "plain"
+
+		[secrets.TEST_SECRET]
+		provider = "plain"
+		value = "test-value-123"
+	EOF
+
+	run "$FNOX_BIN" hook-env -s nu
+
+	assert_success
+	assert_output --partial '"set"'
+	assert_output --partial '"TEST_SECRET":"test-value-123"'
+	assert_output --partial '"__FNOX_SESSION"'
+	assert_output --partial '"unset"'
+}
+
 @test "fnox hook-env loads secrets from fnox.toml" {
 	cd "$TEST_TEMP_DIR"
 	cat >fnox.toml <<-EOF
@@ -100,7 +130,6 @@ teardown() {
 	assert_success
 	assert_output --partial 'export TEST_SECRET="test-value-123"'
 	assert_output --partial 'export __FNOX_SESSION='
-	assert_output --partial 'export __FNOX_DIFF='
 }
 
 @test "fnox hook-env loads multiple secrets" {
@@ -146,7 +175,6 @@ teardown() {
 	assert_success
 	assert_output --partial 'set -gx FISH_SECRET "fish-value"'
 	assert_output --partial 'set -gx __FNOX_SESSION'
-	assert_output --partial 'set -gx __FNOX_DIFF'
 }
 
 @test "fnox hook-env finds config in parent directory" {
@@ -232,6 +260,82 @@ teardown() {
 
 	assert_success
 	assert_output --partial 'export MODIFIED_SECRET="updated-value"'
+}
+
+@test "fnox hook-env reloads when parent config is modified" {
+	# Create parent directory with config
+	parent_dir="$TEST_TEMP_DIR/parent"
+	mkdir -p "$parent_dir"
+	cd "$parent_dir"
+	cat >fnox.toml <<-EOF
+		[providers.plain]
+		type = "plain"
+
+		[secrets.PARENT_SECRET]
+		provider = "plain"
+		value = "parent-original"
+	EOF
+
+	# Create child directory with its own config
+	child_dir="$parent_dir/child"
+	mkdir -p "$child_dir"
+	cd "$child_dir"
+	cat >fnox.toml <<-EOF
+		[secrets.CHILD_SECRET]
+		provider = "plain"
+		value = "child-value"
+	EOF
+
+	# First run - should load both parent and child secrets
+	output1=$("$FNOX_BIN" hook-env -s bash)
+	session=$(echo "$output1" | grep '__FNOX_SESSION=' | sed 's/^export __FNOX_SESSION="//' | sed 's/"$//')
+	echo "$output1" | grep -q 'export PARENT_SECRET="parent-original"'
+	echo "$output1" | grep -q 'export CHILD_SECRET="child-value"'
+
+	# Modify parent config file
+	sleep 1 # Ensure mtime changes
+	cat >"$parent_dir/fnox.toml" <<-EOF
+		[providers.plain]
+		type = "plain"
+
+		[secrets.PARENT_SECRET]
+		provider = "plain"
+		value = "parent-updated"
+	EOF
+
+	# Second run with session - should detect parent modification and reload
+	export __FNOX_SESSION="$session"
+	run "$FNOX_BIN" hook-env -s bash
+
+	assert_success
+	assert_output --partial 'export PARENT_SECRET="parent-updated"'
+}
+
+@test "fnox hook-env reloads when config is deleted" {
+	cd "$TEST_TEMP_DIR"
+	cat >fnox.toml <<-EOF
+		[providers.plain]
+		type = "plain"
+
+		[secrets.TEMPORARY_SECRET]
+		provider = "plain"
+		value = "temp-value"
+	EOF
+
+	# First run - should load secret
+	output1=$("$FNOX_BIN" hook-env -s bash)
+	session=$(echo "$output1" | grep '__FNOX_SESSION=' | sed 's/^export __FNOX_SESSION="//' | sed 's/"$//')
+	echo "$output1" | grep -q 'export TEMPORARY_SECRET="temp-value"'
+
+	# Delete config file
+	rm fnox.toml
+
+	# Second run with session - should detect deletion and unset the secret
+	export __FNOX_SESSION="$session"
+	run "$FNOX_BIN" hook-env -s bash
+
+	assert_success
+	assert_output --partial 'unset TEMPORARY_SECRET'
 }
 
 @test "fnox hook-env reloads when directory changes" {
@@ -410,7 +514,7 @@ teardown() {
 		[secrets.AGE_SECRET]
 		provider = "age"
 		value = """
-$encrypted"""
+		$encrypted"""
 	EOF
 
 	# Run hook-env
@@ -452,8 +556,8 @@ $encrypted"""
 		[secrets.MULTILINE]
 		provider = "plain"
 		value = """line1
-line2
-line3"""
+		line2
+		line3"""
 	EOF
 
 	run "$FNOX_BIN" hook-env -s bash
@@ -505,4 +609,32 @@ line3"""
 	# Extract and verify session is not empty
 	session=$(echo "$output" | grep '__FNOX_SESSION=' | sed 's/^export __FNOX_SESSION="//' | sed 's/"$//')
 	[ -n "$session" ]
+}
+
+# ============================================================================
+# fnox.local.toml support tests
+# ============================================================================
+
+@test "fnox hook-env loads secrets from fnox.local.toml without fnox.toml" {
+	# Create an isolated directory with only fnox.local.toml (no fnox.toml)
+	mkdir -p "$TEST_TEMP_DIR/local-only"
+	cd "$TEST_TEMP_DIR/local-only"
+
+	cat >fnox.local.toml <<-EOF
+		root = true
+
+		[providers.plain]
+		type = "plain"
+
+		[secrets.LOCAL_ONLY_SECRET]
+		provider = "plain"
+		value = "local-only-value"
+	EOF
+
+	# hook-env should load secrets even with only fnox.local.toml
+	run "$FNOX_BIN" hook-env -s bash
+
+	assert_success
+	assert_output --partial 'export LOCAL_ONLY_SECRET="local-only-value"'
+	assert_output --partial '__FNOX_SESSION='
 }
