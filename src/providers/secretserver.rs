@@ -19,32 +19,41 @@ fn secretserver_token() -> Option<String> {
 
 pub struct SecretServerProvider {
     base_url: String,
-    token: String,
+    token: Option<String>,
 }
 
 impl SecretServerProvider {
-    pub fn new(base_url: String, token: String) -> Result<Self> {
+    pub fn new(base_url: String, token: Option<String>) -> Result<Self> {
         let base_url = secretserver_base_url()
             .or(Some(base_url))
             .map(|v| v.trim_end_matches('/').to_string())
             .ok_or_else(|| FnoxError::ProviderAuthFailed {
                 provider: PROVIDER_NAME.to_string(),
-                details: "base_url not configured".to_string(),
-                hint: "Set FNOX_SECRETSERVER_BASE_URL or pass base_url in config".to_string(),
+                details: "token not configured".to_string(),
+                hint: "Set FNOX_SECRETSERVER_TOKEN or pass token in config".to_string(),
                 url: PROVIDER_URL.to_string(),
             })?;
 
-        let token =
-            secretserver_token()
-                .or(Some(token))
-                .ok_or_else(|| FnoxError::ProviderAuthFailed {
-                    provider: PROVIDER_NAME.to_string(),
-                    details: "token not configured".to_string(),
-                    hint: "Set FNOX_SECRETSERVER_TOKEN or pass token in config".to_string(),
-                    url: PROVIDER_URL.to_string(),
-                })?;
+        match token {
+            Some(t) => Ok(Self {
+                base_url,
+                token: Some(t),
+            }),
+            None => Self::from_env(base_url),
+        }
+    }
 
-        Ok(Self { base_url, token })
+    fn from_env(base_url: String) -> Result<Self> {
+        let ss_token = secretserver_token().ok_or_else(|| FnoxError::ProviderAuthFailed {
+            provider: PROVIDER_NAME.to_string(),
+            details: "token not configured".to_string(),
+            hint: "Set FNOX_SECRETSERVER_TOKEN or pass token in config".to_string(),
+            url: PROVIDER_URL.to_string(),
+        })?;
+        Ok(Self {
+            base_url,
+            token: Some(ss_token),
+        })
     }
 
     fn create_client() -> Result<reqwest::Client> {
@@ -58,8 +67,21 @@ impl SecretServerProvider {
             })
     }
 
-    async fn get_auth_token(&self) -> Result<String> {
+    async fn get_auth_token(&self) -> Result<Option<String>> {
         Ok(self.token.clone())
+    }
+
+    fn ensure_token(&self, token: Option<String>) -> Result<String> {
+        token.ok_or_else(|| FnoxError::ProviderAuthFailed {
+            provider: PROVIDER_NAME.to_string(),
+            details: "token not configured".to_string(),
+            hint: "Set FNOX_SECRETSERVER_TOKEN or pass token in config".to_string(),
+            url: PROVIDER_URL.to_string(),
+        })
+    }
+
+    async fn get_bearer_token(&self) -> Result<String> {
+        self.ensure_token(self.get_auth_token().await?)
     }
 
     fn parse_reference(&self, value: &str) -> Result<(i32, String)> {
@@ -85,7 +107,6 @@ impl SecretServerProvider {
 
     async fn get_field_value(&self, secret_id: i32, field_slug: &str) -> Result<String> {
         let client = Self::create_client()?;
-        let token = self.get_auth_token().await?;
 
         let url = format!(
             "{}/api/v1/secrets/{}/fields/{}",
@@ -96,7 +117,7 @@ impl SecretServerProvider {
 
         let response = client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
+            .header("Authorization", format!("Bearer {}", self.get_bearer_token().await?))
             .send()
             .await
             .map_err(|e| FnoxError::ProviderApiError {
@@ -133,17 +154,16 @@ impl SecretServerProvider {
             });
         }
 
-        let field_response: SecretFieldResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| FnoxError::ProviderInvalidResponse {
-                    provider: PROVIDER_NAME.to_string(),
-                    details: format!("Failed to parse field response: {}", e),
-                    hint: "The Secret Server API returned an unexpected response format"
-                        .to_string(),
-                    url: PROVIDER_URL.to_string(),
-                })?;
+        let field_response: SecretFieldResponse = response
+            .json::<String>()
+            .await
+            .map(|s| SecretFieldResponse { value: Some(s) })
+            .map_err(|e| FnoxError::ProviderInvalidResponse {
+                provider: PROVIDER_NAME.to_string(),
+                details: format!("Failed to parse field response: {}", e),
+                hint: "The Secret Server API returned an unexpected response format".to_string(),
+                url: PROVIDER_URL.to_string(),
+            })?;
 
         Ok(field_response.value.unwrap_or_default())
     }
@@ -200,7 +220,6 @@ impl crate::providers::Provider for SecretServerProvider {
 
     async fn test_connection(&self) -> Result<()> {
         let client = Self::create_client()?;
-        let token = self.get_auth_token().await?;
 
         let url = format!("{}/api/v1/secrets/lookup", self.base_url);
 
@@ -208,7 +227,7 @@ impl crate::providers::Provider for SecretServerProvider {
 
         let response = client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
+            .header("Authorization", format!("Bearer {}", self.get_bearer_token().await?))
             .send()
             .await
             .map_err(|e| FnoxError::ProviderApiError {
